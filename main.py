@@ -34,39 +34,40 @@ def download_fams_report():
 
         # 2. Go to Asset Enquiry Report
         print("Navigating to Asset Enquiry Report...")
-        page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="domcontentloaded")
+        page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
         page.wait_for_timeout(5000)
 
-        # 3. Click Show/Search button
-        print("Triggering Show/Search button...")
-        show_selector = "input[value='Show'], button:has-text('Show'), input[value='Search'], button:has-text('Search'), #btnSearch, #btnShow, input[type='submit']"
-        try:
-            page.click(show_selector, timeout=10000, force=True)
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(5000)
-        except Exception as e:
-            print(f"Show step note: {e}")
+        # 3. Trigger Report Generation
+        print("Triggering Show/Search action...")
+        # Check main page + frames
+        frames = page.frames
+        for frame in frames:
+            try:
+                # Try pressing enter or clicking submit/show buttons inside frames
+                submit_btn = frame.query_selector("input[type='submit'], button[type='submit'], input[value*='Show'], input[value*='Search'], #btnShow, #btnSearch")
+                if submit_btn:
+                    submit_btn.click(force=True)
+                    print("Clicked report button inside frame!")
+                    break
+            except Exception:
+                pass
 
-        # 4. Attempt Export or Capture DOM Table
-        print("Attempting Export / Data Extraction...")
-        file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
+        page.wait_for_timeout(10000)
 
-        try:
-            export_selector = "img[title*='Excel'], img[src*='excel'], .fa-file-excel, #btnExport, #btnExcel, input[value*='Export']"
-            with page.expect_download(timeout=10000) as download_info:
-                page.click(export_selector, timeout=10000, force=True)
-            download = download_info.value
-            download.save_as(file_path)
-            print("Downloaded file successfully!")
-        except Exception:
-            print("Direct export download skipped. Reading page tables directly...")
-            content = page.content()
-            html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            file_path = html_path
+        # 4. Extract content/tables from all frames if present
+        print("Extracting DOM table content...")
+        full_html = page.content()
+        for frame in page.frames:
+            try:
+                full_html += f"\n{frame.content()}"
+            except Exception:
+                pass
 
-        return file_path
+        html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(full_html)
+
+        return html_path
 
     finally:
         browser.close()
@@ -81,17 +82,12 @@ def update_google_sheet(file_path):
     sh = gc.open_by_key(spreadsheet_id)
     worksheet = sh.worksheet("FAR Data")
 
-    if file_path.endswith(".html"):
-        tables = pd.read_html(file_path, flavor='lxml')
-        if not tables:
-            raise ValueError("No table found on page. Check portal credentials/navigation.")
-        # Filter out tiny layout tables, pick the largest table
-        df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
-    else:
-        try:
-            df = pd.read_excel(file_path)
-        except Exception:
-            df = pd.read_html(file_path, flavor='lxml')[0]
+    tables = pd.read_html(file_path, flavor='lxml')
+    if not tables:
+        raise ValueError("No table found on page. Check portal navigation.")
+    
+    # Select the largest table by cell count
+    df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
 
     # Store Filter logic (#664 onwards)
     store_col = [col for col in df.columns if 'store' in str(col).lower() or 'site' in str(col).lower() or 'location' in str(col).lower()]
