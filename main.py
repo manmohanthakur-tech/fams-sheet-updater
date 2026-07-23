@@ -35,37 +35,29 @@ def download_fams_report():
         # 2. Go to Asset Enquiry Report
         print("Navigating to Asset Enquiry Report...")
         page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(3000)
 
-        # 3. Trigger Report Generation
+        # 3. Trigger Report Search
         print("Triggering Show/Search action...")
-        # Check main page + frames
-        frames = page.frames
-        for frame in frames:
-            try:
-                # Try pressing enter or clicking submit/show buttons inside frames
-                submit_btn = frame.query_selector("input[type='submit'], button[type='submit'], input[value*='Show'], input[value*='Search'], #btnShow, #btnSearch")
-                if submit_btn:
-                    submit_btn.click(force=True)
-                    print("Clicked report button inside frame!")
-                    break
-            except Exception:
-                pass
+        show_btn = page.query_selector("input[value*='Show'], input[value*='Search'], button[type='submit'], #btnShow, #btnSearch")
+        if show_btn:
+            show_btn.click(force=True)
+            print("Clicked search button!")
+        else:
+            page.keyboard.press("Enter")
 
-        page.wait_for_timeout(10000)
+        # Wait up to 15 seconds for a table element to appear in DOM
+        try:
+            page.wait_for_selector("table, .table, grid", timeout=15000)
+            print("Table element detected on screen!")
+        except Exception:
+            print("Warning: Table selector wait timed out. Saving screenshot for debug...")
+            page.screenshot(path=os.path.join(DOWNLOAD_DIR, "debug_page.png"))
 
-        # 4. Extract content/tables from all frames if present
-        print("Extracting DOM table content...")
-        full_html = page.content()
-        for frame in page.frames:
-            try:
-                full_html += f"\n{frame.content()}"
-            except Exception:
-                pass
-
+        # 4. Save Page HTML
         html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
         with open(html_path, "w", encoding="utf-8") as f:
-            f.write(full_html)
+            f.write(page.content())
 
         return html_path
 
@@ -84,9 +76,9 @@ def update_google_sheet(file_path):
 
     tables = pd.read_html(file_path, flavor='lxml')
     if not tables:
-        raise ValueError("No table found on page. Check portal navigation.")
+        raise ValueError("No table found on page. FAMS portal requires specific search dropdown inputs.")
     
-    # Select the largest table by cell count
+    # Pick the largest data table
     df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
 
     # Store Filter logic (#664 onwards)
