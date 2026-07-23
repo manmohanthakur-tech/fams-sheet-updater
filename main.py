@@ -36,80 +36,120 @@ def download_fams_report():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        # Step 1: Utilities -> Asset Enquiry
+        # Step 1: Navigates to Utilities -> Asset Enquiry
         print("1. Navigating to Utilities -> Asset Enquiry...")
         page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # Step 2: Select Branches (#664 onwards)
-        print("2. Selecting Branches (#664 and above)...")
-        try:
-            branch_dropdown = page.query_selector(".multiselect, select[name*='Branch'], select[name*='Store'], #ddlBranch, .dropdown-toggle")
-            if branch_dropdown:
-                branch_dropdown.click()
-                page.wait_for_timeout(1000)
+        # Step 2: Select Branches dropdown & check stores #664 and above
+        print("2. Selecting Branches dropdown (stores #664 and above)...")
+        page.evaluate("""() => {
+            const selects = document.querySelectorAll("select");
+            selects.forEach(s => {
+                Array.from(s.options).forEach(opt => {
+                    const txt = opt.text || opt.value || '';
+                    const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
+                    if (nums.length > 0 && nums[0] >= 664) {
+                        opt.selected = true;
+                    }
+                });
+                s.dispatchEvent(new Event('change', { bubbles: true }));
+            });
 
-            options = page.query_selector_all("option, .multiselect-container input[type='checkbox'], li label")
-            for opt in options:
-                txt = opt.inner_text() if hasattr(opt, 'inner_text') else opt.get_attribute("value") or ""
-                nums = [int(s) for s in txt.replace('-', ' ').replace('_', ' ').split() if s.isdigit()]
-                if nums and nums[0] >= 664:
-                    if opt.tag_name == "option":
-                        opt.click()
-                    elif opt.tag_name == "input" and not opt.is_checked():
-                        opt.check()
-        except Exception as e:
-            print(f"Branch selection note: {e}")
-
+            const checkboxes = document.querySelectorAll(".multiselect-container input[type='checkbox'], input[type='checkbox']");
+            checkboxes.forEach(cb => {
+                const label = cb.closest('label') || cb.parentElement;
+                const txt = label ? label.innerText : cb.value || '';
+                const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
+                if (nums.length > 0 && nums[0] >= 664) {
+                    if (!cb.checked) {
+                        cb.click();
+                        cb.checked = true;
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }
+            });
+        }""")
         page.wait_for_timeout(2000)
 
-        # Step 3 & 4: Click 'Show' and wait for table to populate
-        print("3 & 4. Clicking 'Show' and waiting for data table...")
-        show_btn = page.query_selector("input[value*='Show'], input[value*='Search'], button:has-text('Show'), #btnShow, #btnSearch")
-        if show_btn:
-            show_btn.click(force=True)
-        else:
-            page.keyboard.press("Enter")
+        # Step 3: Click 'Export Excel' (located next to Export CSV)
+        print("3. Clicking 'Export Excel' button (next to Export CSV)...")
+        page.evaluate("""() => {
+            const elements = Array.from(document.querySelectorAll("input, button, a, img, span"));
+            const excelBtn = elements.find(e => {
+                const txt = (e.value || e.innerText || e.title || e.alt || '').toLowerCase();
+                return txt.includes('excel') || (txt.includes('export') && !txt.includes('csv'));
+            });
+            if (excelBtn) excelBtn.click();
+        }""")
+        page.wait_for_timeout(4000)
+
+        # Step 4: Select stores under Branches dropdown (top right side inside pop-up/window)
+        # & wait for table data (Asset Code, Physical ID...) to populate
+        print("4. Selecting top-right Branches dropdown in pop-up & waiting for table data...")
+        page.evaluate("""() => {
+            // Target top-right dropdown / pop-up elements
+            const popSelects = document.querySelectorAll(".modal select, .pop-up select, .ui-dialog select, select");
+            popSelects.forEach(s => {
+                Array.from(s.options).forEach(opt => {
+                    const txt = opt.text || opt.value || '';
+                    const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
+                    if (nums.length > 0 && nums[0] >= 664) {
+                        opt.selected = true;
+                    }
+                });
+                s.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+
+            const popCheckboxes = document.querySelectorAll(".modal input[type='checkbox'], .pop-up input[type='checkbox'], .multiselect-container input[type='checkbox']");
+            popCheckboxes.forEach(cb => {
+                const label = cb.closest('label') || cb.parentElement;
+                const txt = label ? label.innerText : cb.value || '';
+                const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
+                if (nums.length > 0 && nums[0] >= 664) {
+                    if (!cb.checked) {
+                        cb.click();
+                        cb.checked = true;
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }
+            });
+        }""")
 
         try:
-            page.wait_for_selector("table, .dataTables_wrapper, .grid, tbody tr", timeout=25000)
-            print("Data table populated on screen!")
+            # Wait for table headers (Asset Code, Physical ID, etc.) to populate
+            page.wait_for_selector("table th:has-text('Asset'), table th:has-text('Code'), table th:has-text('Physical'), tbody tr", timeout=30000)
+            print("Pop-up table populated on screen!")
         except Exception as e:
             print(f"Table render wait note: {e}")
 
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(3000)
 
-        # Step 5: Click Export below the popped-out data
-        print("5. Clicking Export below the popped-out data table...")
+        # Step 5: Click the Export button below the popped-out data
+        print("5. Clicking the Export button below the popped-out data...")
         file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
 
-        export_selectors = [
-            "input[value*='Export']",
-            "button:has-text('Export')",
-            "a:has-text('Export')",
-            ".dataTables_wrapper .buttons-excel",
-            ".dataTables_wrapper .buttons-csv",
-            "#btnExport",
-            "img[title*='Export']"
-        ]
-
         downloaded = False
-        for selector in export_selectors:
-            btn = page.query_selector(selector)
-            if btn:
-                try:
-                    with page.expect_download(timeout=15000) as download_info:
-                        btn.click(force=True)
-                    download = download_info.value
-                    download.save_as(file_path)
-                    downloaded = True
-                    print(f"Successfully exported report using selector: {selector}")
-                    break
-                except Exception as e:
-                    print(f"Export click attempt note ({selector}): {e}")
+        try:
+            with page.expect_download(timeout=25000) as download_info:
+                page.evaluate("""() => {
+                    // Look specifically for Export button in/below modal or table container
+                    const btns = Array.from(document.querySelectorAll("input, button, a, img, span"));
+                    const exportBtn = btns.reverse().find(b => {
+                        const val = (b.value || b.innerText || b.title || b.alt || '').toLowerCase();
+                        return val.includes('export');
+                    });
+                    if (exportBtn) exportBtn.click();
+                }""")
+            download = download_info.value
+            download.save_as(file_path)
+            downloaded = True
+            print("Successfully downloaded exported report!")
+        except Exception as e:
+            print(f"Download trigger note: {e}")
 
         if not downloaded:
-            print("Direct file download timed out. Capturing rendered HTML table directly...")
+            print("Capturing rendered popped-out HTML table as fallback...")
             html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(page.content())
@@ -134,9 +174,11 @@ def update_google_sheet(file_path):
         df = pd.read_excel(file_path)
     else:
         tables = pd.read_html(file_path, flavor='lxml')
+        if not tables:
+            raise ValueError("No table found in exported data.")
         df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
 
-    # Filter for Store >= 664
+    # Filter Store >= 664
     store_col = [col for col in df.columns if 'store' in str(col).lower() or 'site' in str(col).lower() or 'branch' in str(col).lower() or 'location' in str(col).lower()]
     if store_col:
         col_name = store_col[0]
