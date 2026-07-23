@@ -15,12 +15,15 @@ def download_fams_report():
     print("Starting browser automation...")
     p = sync_playwright().start()
     browser = p.chromium.launch(headless=True)
-    context = browser.new_context(accept_downloads=True)
+    context = browser.new_context(
+        accept_downloads=True,
+        viewport={"width": 1366, "height": 768}
+    )
     page = context.new_page()
 
     try:
-        # 1. Login to FAMS Portal
-        print("Navigating to FAMS login page...")
+        # Step 0: Login
+        print("0. Logging into FAMS...")
         page.goto("https://fams.vmart.co.in/WebfamsLive/Account/Login", wait_until="domcontentloaded")
 
         user_input = page.wait_for_selector("input[name='Username'], input#Username, input[type='text']", timeout=20000)
@@ -31,73 +34,82 @@ def download_fams_report():
 
         page.click("button[type='submit'], input[type='submit'], #btnLogin")
         page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(2000)
+
+        # Step 1: Utilities -> Asset Enquiry
+        print("1. Navigating to Utilities -> Asset Enquiry...")
+        page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # 2. Navigate via Menu: Utilities -> Asset Enquiry
-        print("Navigating via Menu: Utilities -> Asset Enquiry...")
+        # Step 2: Select Branches (#664 onwards)
+        print("2. Selecting Branches (#664 and above)...")
         try:
-            # Click Utilities menu
-            utilities_menu = page.query_selector("a:has-text('Utilities'), :text('Utilities'), #menu_utilities")
-            if utilities_menu:
-                utilities_menu.click()
+            branch_dropdown = page.query_selector(".multiselect, select[name*='Branch'], select[name*='Store'], #ddlBranch, .dropdown-toggle")
+            if branch_dropdown:
+                branch_dropdown.click()
                 page.wait_for_timeout(1000)
-            
-            # Click Asset Enquiry sub-menu
-            asset_enquiry = page.query_selector("a:has-text('Asset Enquiry'), :text('Asset Enquiry')")
-            if asset_enquiry:
-                asset_enquiry.click()
-            else:
-                page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
-        except Exception as e:
-            print(f"Menu navigation note: {e}. Navigating directly...")
-            page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
 
-        page.wait_for_timeout(3000)
-
-        # 3. Select Store Filter (#664 onwards if dropdown/input exists)
-        print("Applying store selection filters...")
-        try:
-            # Look for store dropdown or range inputs
-            store_select = page.query_selector("select[name*='Store'], select[id*='Store'], select[name*='site']")
-            if store_select:
-                options = store_select.query_selector_all("option")
-                for opt in options:
-                    txt = opt.inner_text()
-                    # Select options that contain 664 or numbers >= 664
-                    nums = [int(s) for s in txt.replace('-', ' ').split() if s.isdigit()]
-                    if nums and nums[0] >= 664:
+            options = page.query_selector_all("option, .multiselect-container input[type='checkbox'], li label")
+            for opt in options:
+                txt = opt.inner_text() if hasattr(opt, 'inner_text') else opt.get_attribute("value") or ""
+                nums = [int(s) for s in txt.replace('-', ' ').replace('_', ' ').split() if s.isdigit()]
+                if nums and nums[0] >= 664:
+                    if opt.tag_name == "option":
                         opt.click()
+                    elif opt.tag_name == "input" and not opt.is_checked():
+                        opt.check()
         except Exception as e:
-            print(f"Store filter UI selection note: {e}")
+            print(f"Branch selection note: {e}")
 
-        # 4. Export Excel or Click Show
-        print("Triggering Export Excel / Search...")
-        file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
-        
-        excel_exported = False
+        page.wait_for_timeout(2000)
+
+        # Step 3 & 4: Click 'Show' and wait for table to populate
+        print("3 & 4. Clicking 'Show' and waiting for data table...")
+        show_btn = page.query_selector("input[value*='Show'], input[value*='Search'], button:has-text('Show'), #btnShow, #btnSearch")
+        if show_btn:
+            show_btn.click(force=True)
+        else:
+            page.keyboard.press("Enter")
+
         try:
-            # Try direct Excel Export button first
-            excel_btn = page.query_selector("a:has-text('Export'), button:has-text('Export'), input[value*='Export'], img[title*='Excel'], .fa-file-excel")
-            if excel_btn:
-                with page.expect_download(timeout=15000) as download_info:
-                    excel_btn.click(force=True)
-                download = download_info.value
-                download.save_as(file_path)
-                excel_exported = True
-                print("Excel file downloaded directly from portal!")
+            page.wait_for_selector("table, .dataTables_wrapper, .grid, tbody tr", timeout=25000)
+            print("Data table populated on screen!")
         except Exception as e:
-            print(f"Direct export trigger note: {e}")
+            print(f"Table render wait note: {e}")
 
-        if not excel_exported:
-            # Fallback: Click Show/Search and parse HTML table
-            show_btn = page.query_selector("input[value*='Show'], input[value*='Search'], button[type='submit'], #btnShow, #btnSearch")
-            if show_btn:
-                show_btn.click(force=True)
-            else:
-                page.keyboard.press("Enter")
-            
-            page.wait_for_timeout(8000)
-            
+        page.wait_for_timeout(5000)
+
+        # Step 5: Click Export below the popped-out data
+        print("5. Clicking Export below the popped-out data table...")
+        file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
+
+        export_selectors = [
+            "input[value*='Export']",
+            "button:has-text('Export')",
+            "a:has-text('Export')",
+            ".dataTables_wrapper .buttons-excel",
+            ".dataTables_wrapper .buttons-csv",
+            "#btnExport",
+            "img[title*='Export']"
+        ]
+
+        downloaded = False
+        for selector in export_selectors:
+            btn = page.query_selector(selector)
+            if btn:
+                try:
+                    with page.expect_download(timeout=15000) as download_info:
+                        btn.click(force=True)
+                    download = download_info.value
+                    download.save_as(file_path)
+                    downloaded = True
+                    print(f"Successfully exported report using selector: {selector}")
+                    break
+                except Exception as e:
+                    print(f"Export click attempt note ({selector}): {e}")
+
+        if not downloaded:
+            print("Direct file download timed out. Capturing rendered HTML table directly...")
             html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(page.content())
@@ -110,7 +122,7 @@ def download_fams_report():
         p.stop()
 
 def update_google_sheet(file_path):
-    print("Updating Google Sheet...")
+    print("6. Updating Google Sheet...")
     creds_dict = json.loads(GOOGLE_CREDS)
     gc = gspread.service_account_from_dict(creds_dict)
 
@@ -122,12 +134,10 @@ def update_google_sheet(file_path):
         df = pd.read_excel(file_path)
     else:
         tables = pd.read_html(file_path, flavor='lxml')
-        if not tables:
-            raise ValueError("No table found on page. Check FAMS portal filters.")
         df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
 
-    # Ensure store filter (Store #664 and above)
-    store_col = [col for col in df.columns if 'store' in str(col).lower() or 'site' in str(col).lower() or 'location' in str(col).lower()]
+    # Filter for Store >= 664
+    store_col = [col for col in df.columns if 'store' in str(col).lower() or 'site' in str(col).lower() or 'branch' in str(col).lower() or 'location' in str(col).lower()]
     if store_col:
         col_name = store_col[0]
         def filter_store(val):
