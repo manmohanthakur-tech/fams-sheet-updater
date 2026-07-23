@@ -36,13 +36,13 @@ def download_fams_report():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
-        # Step 1: Navigates to Utilities -> Asset Enquiry
+        # Step 1: Navigate to Asset Enquiry
         print("1. Navigating to Utilities -> Asset Enquiry...")
         page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # Step 2: Select Branches dropdown & check stores #664 and above
-        print("2. Selecting Branches dropdown (stores #664 and above)...")
+        # Step 2: Select Branches dropdown (#664 onwards)
+        print("2. Selecting initial Branches dropdown (#664 and above)...")
         page.evaluate("""() => {
             const selects = document.querySelectorAll("select");
             selects.forEach(s => {
@@ -72,8 +72,8 @@ def download_fams_report():
         }""")
         page.wait_for_timeout(2000)
 
-        # Step 3: Click 'Export Excel' (located next to Export CSV)
-        print("3. Clicking 'Export Excel' button (next to Export CSV)...")
+        # Step 3: Click 'Export Excel' (next to Export CSV)
+        print("3. Clicking 'Export Excel' (next to Export CSV)...")
         page.evaluate("""() => {
             const elements = Array.from(document.querySelectorAll("input, button, a, img, span"));
             const excelBtn = elements.find(e => {
@@ -82,14 +82,16 @@ def download_fams_report():
             });
             if (excelBtn) excelBtn.click();
         }""")
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(5000)
 
-        # Step 4: Select stores under Branches dropdown (top right side inside pop-up/window)
-        # & wait for table data (Asset Code, Physical ID...) to populate
+        # Step 4: Select stores under top-right Branches dropdown in pop-up
         print("4. Selecting top-right Branches dropdown in pop-up & waiting for table data...")
+        
+        # Wait for modal/pop-up container or select to appear
+        page.wait_for_selector("select, .modal, .pop-up, table", timeout=20000)
+        
         page.evaluate("""() => {
-            // Target top-right dropdown / pop-up elements
-            const popSelects = document.querySelectorAll(".modal select, .pop-up select, .ui-dialog select, select");
+            const popSelects = document.querySelectorAll("select");
             popSelects.forEach(s => {
                 Array.from(s.options).forEach(opt => {
                     const txt = opt.text || opt.value || '';
@@ -101,7 +103,7 @@ def download_fams_report():
                 s.dispatchEvent(new Event('change', { bubbles: true }));
             });
 
-            const popCheckboxes = document.querySelectorAll(".modal input[type='checkbox'], .pop-up input[type='checkbox'], .multiselect-container input[type='checkbox']");
+            const popCheckboxes = document.querySelectorAll("input[type='checkbox']");
             popCheckboxes.forEach(cb => {
                 const label = cb.closest('label') || cb.parentElement;
                 const txt = label ? label.innerText : cb.value || '';
@@ -116,40 +118,39 @@ def download_fams_report():
             });
         }""")
 
+        # Explicitly wait for table rows to be present in DOM
         try:
-            # Wait for table headers (Asset Code, Physical ID, etc.) to populate
-            page.wait_for_selector("table th:has-text('Asset'), table th:has-text('Code'), table th:has-text('Physical'), tbody tr", timeout=30000)
-            print("Pop-up table populated on screen!")
+            page.wait_for_selector("table tbody tr", timeout=30000)
+            print("Pop-up table rows loaded successfully!")
         except Exception as e:
-            print(f"Table render wait note: {e}")
+            print(f"Table row wait note: {e}")
 
         page.wait_for_timeout(3000)
 
         # Step 5: Click the Export button below the popped-out data
-        print("5. Clicking the Export button below the popped-out data...")
+        print("5. Clicking Export button below popped-out data...")
         file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
 
         downloaded = False
         try:
             with page.expect_download(timeout=25000) as download_info:
                 page.evaluate("""() => {
-                    // Look specifically for Export button in/below modal or table container
                     const btns = Array.from(document.querySelectorAll("input, button, a, img, span"));
                     const exportBtn = btns.reverse().find(b => {
                         const val = (b.value || b.innerText || b.title || b.alt || '').toLowerCase();
-                        return val.includes('export');
+                        return val === 'export' || val.includes('export');
                     });
                     if (exportBtn) exportBtn.click();
                 }""")
             download = download_info.value
             download.save_as(file_path)
             downloaded = True
-            print("Successfully downloaded exported report!")
+            print("Successfully downloaded exported report file!")
         except Exception as e:
             print(f"Download trigger note: {e}")
 
         if not downloaded:
-            print("Capturing rendered popped-out HTML table as fallback...")
+            print("Capturing rendered popped-out HTML table directly...")
             html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(page.content())
@@ -173,9 +174,10 @@ def update_google_sheet(file_path):
     if file_path.endswith(".xlsx") or file_path.endswith(".xls"):
         df = pd.read_excel(file_path)
     else:
-        tables = pd.read_html(file_path, flavor='lxml')
+        # Read table from rendered HTML
+        tables = pd.read_html(file_path)
         if not tables:
-            raise ValueError("No table found in exported data.")
+            raise ValueError("No table found in exported data. Check if store data was loaded in FAMS.")
         df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
 
     # Filter Store >= 664
