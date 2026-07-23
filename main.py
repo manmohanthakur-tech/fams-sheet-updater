@@ -18,7 +18,7 @@ def download_fams_report():
     browser = p.chromium.launch(headless=True)
     page = browser.new_context().new_page()
 
-    # 1. Login
+    # 1. Login to FAMS Portal
     print("Navigating to FAMS login page...")
     page.goto(
         "https://fams.vmart.co.in/WebfamsLive/Account/Login?ReturnUrl=%2fWebfamsLive%2f%3fDashboard%3d1&Dashboard=1",
@@ -40,58 +40,26 @@ def download_fams_report():
     page.click("button[type='submit'], input[type='submit'], #btnLogin")
     page.wait_for_load_state("networkidle")
 
-    # 2. Navigate: Utilities -> Asset Enquiry
-    print("Navigating to Utilities -> Asset Enquiry...")
-    # Click on Utilities menu if it exists, or go directly
-    try:
-      page.click("text=Utilities", timeout=5000)
-      page.click("text=Asset Enquiry", timeout=5000)
-    except Exception:
-      print("Direct navigation fallback to Asset Enquiry...")
-      page.goto(
-          "https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport",
-          wait_until="networkidle",
-      )
-
-    page.wait_for_load_state("networkidle")
+    # 2. Navigate: Utilities -> Asset Enquiry Report
+    print("Navigating to Asset Enquiry Report...")
+    page.goto(
+        "https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport",
+        wait_until="networkidle",
+    )
     page.wait_for_timeout(3000)
 
-    # 3. Select Stores starting from Store #664 onwards
-    print("Applying Store filter (#664 onwards)...")
-    try:
-      # If there is a Store Dropdown / Multi-select
-      store_dropdown = page.query_selector("select#StoreId, select[name*='Store'], #ddlStore")
-      if store_dropdown:
-        options = page.eval_on_selector_all("select#StoreId option, select[name*='Store'] option, #ddlStore option", "opts => opts.map(o => ({text: o.text, value: o.value}))")
-        
-        # Filter options that have store numbers >= 664
-        selected_values = []
-        for opt in options:
-          # Extract numerical part from store name/code
-          nums = [int(s) for s in opt['text'].split() if s.isdigit()]
-          if nums and nums[0] >= 664:
-            selected_values.append(opt['value'])
-          elif "664" in opt['text']:
-            selected_values.append(opt['value'])
-
-        if selected_values:
-          page.select_option("select#StoreId, select[name*='Store'], #ddlStore", value=selected_values)
-          print(f"Selected {len(selected_values)} stores from #664 onwards.")
-    except Exception as e:
-      print(f"Store filter warning (proceeding with default selection): {e}")
-
-    # 4. Click Show / Search if needed
+    # 3. Click Show / Search to load data
     show_btn = page.query_selector(
         "button:has-text('Show'), input[value='Show'], button:has-text('Search'), input[value='Search'], #btnSearch, #btnShow"
     )
     if show_btn:
-      print("Clicking Show/Search...")
+      print("Clicking Show/Search button...")
       show_btn.click()
       page.wait_for_load_state("networkidle")
       page.wait_for_timeout(3000)
 
-    # 5. Export Excel
-    print("Clicking Export Excel...")
+    # 4. Trigger Export Download
+    print("Exporting data...")
     with page.expect_download(timeout=60000) as download_info:
       page.click(
           "button:has-text('Export'), a:has-text('Export'),"
@@ -116,20 +84,24 @@ def update_google_sheet(file_path):
   sh = gc.open_by_key(spreadsheet_id)
   worksheet = sh.worksheet("FAR Data")
 
-  # Read Excel or HTML export format
+  # Read Excel or HTML table
   try:
     df = pd.read_excel(file_path)
   except Exception:
     df = pd.read_html(file_path)[0]
 
-  # Additional safety Python filter for Store #664 onwards (if column exists)
-  store_col = [col for col in df.columns if "store" in str(col).lower() or "site" in str(col).lower()]
+  # Clean and filter store series #664 onwards safely in Python
+  store_col = [
+      col
+      for col in df.columns
+      if "store" in str(col).lower() or "site" in str(col).lower()
+  ]
   if store_col:
     col_name = store_col[0]
-    # Keep rows where store number is 664 or higher, or contains 664+
+
     def filter_store(val):
       str_val = str(val)
-      nums = [int(s) for s in str_val.replace('-', ' ').split() if s.isdigit()]
+      nums = [int(s) for s in str_val.replace("-", " ").split() if s.isdigit()]
       if nums:
         return nums[0] >= 664
       return True
