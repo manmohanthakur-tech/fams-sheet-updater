@@ -40,32 +40,40 @@ def download_fams_report():
     page.click("button[type='submit'], input[type='submit'], #btnLogin")
     page.wait_for_load_state("networkidle")
 
-    # 2. Navigate: Utilities -> Asset Enquiry Report
+    # 2. Navigate to Asset Enquiry Report
     print("Navigating to Asset Enquiry Report...")
     page.goto(
         "https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport",
         wait_until="networkidle",
     )
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(4000)
 
-    # 3. Click Show / Search to load data
-    show_btn = page.query_selector(
-        "button:has-text('Show'), input[value='Show'], button:has-text('Search'), input[value='Search'], #btnSearch, #btnShow"
-    )
-    if show_btn:
-      print("Clicking Show/Search button...")
+    # 3. Click Show / Search button first to generate the report view
+    print("Clicking Search / Show button...")
+    try:
+      show_btn = page.wait_for_selector(
+          "button:has-text('Show'), input[value='Show'],"
+          " button:has-text('Search'), input[value='Search'], #btnSearch,"
+          " #btnShow, .btn-primary",
+          timeout=10000,
+      )
       show_btn.click()
       page.wait_for_load_state("networkidle")
-      page.wait_for_timeout(3000)
+      page.wait_for_timeout(5000)
+    except Exception as e:
+      print(f"Notice: Show button step skipped or auto-loaded ({e})")
 
     # 4. Trigger Export Download
-    print("Exporting data...")
+    print("Exporting data to Excel...")
     with page.expect_download(timeout=60000) as download_info:
-      page.click(
+      # Click Export / Excel button
+      export_btn = page.wait_for_selector(
           "button:has-text('Export'), a:has-text('Export'),"
           " button:has-text('Excel'), a:has-text('Excel'), input[value='Export'],"
-          " .fa-file-excel, .fa-download, #btnExport, #btnExcel"
+          " .fa-file-excel, .fa-download, #btnExport, #btnExcel",
+          timeout=15000,
       )
+      export_btn.click()
 
     download = download_info.value
     file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
@@ -84,13 +92,13 @@ def update_google_sheet(file_path):
   sh = gc.open_by_key(spreadsheet_id)
   worksheet = sh.worksheet("FAR Data")
 
-  # Read Excel or HTML table
+  # Read Excel or HTML export
   try:
     df = pd.read_excel(file_path)
   except Exception:
     df = pd.read_html(file_path)[0]
 
-  # Clean and filter store series #664 onwards safely in Python
+  # Filter Store Series #664 onwards safely in Python
   store_col = [
       col
       for col in df.columns
@@ -108,7 +116,7 @@ def update_google_sheet(file_path):
 
     initial_rows = len(df)
     df = df[df[col_name].apply(filter_store)]
-    print(f"Filtered rows in Python: {initial_rows} -> {len(df)} rows.")
+    print(f"Filtered rows: {initial_rows} -> {len(df)} rows.")
 
   df = df.fillna("")
 
