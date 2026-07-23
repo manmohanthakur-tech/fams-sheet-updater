@@ -4,7 +4,6 @@ import gspread
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# Setup credentials from GitHub Secrets
 FAMS_USER = os.getenv("FAMS_USER")
 FAMS_PASS = os.getenv("FAMS_PASS")
 GOOGLE_CREDS = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -22,21 +21,40 @@ def download_fams_report():
     # 1. Login to FAMS Portal
     print("Navigating to FAMS login page...")
     page.goto(
-        "https://fams.vmart.co.in/WebfamsLive/Account/Login?ReturnUrl=%2fWebfamsLive%2f%3fDashboard%3d1&Dashboard=1"
+        "https://fams.vmart.co.in/WebfamsLive/Account/Login?ReturnUrl=%2fWebfamsLive%2f%3fDashboard%3d1&Dashboard=1",
+        wait_until="networkidle",
     )
 
-    page.fill("input[name='Username']", FAMS_USER)
-    page.fill("input[name='Password']", FAMS_PASS)
-    page.click("button[type='submit']")
+    # Wait for input fields to appear flexible selectors
+    user_input = page.wait_for_selector(
+        "input[name='Username'], input#Username, input[type='text']",
+        timeout=15000,
+    )
+    user_input.fill(FAMS_USER)
+
+    pass_input = page.wait_for_selector(
+        "input[name='Password'], input#Password, input[type='password']",
+        timeout=15000,
+    )
+    pass_input.fill(FAMS_PASS)
+
+    # Click login button
+    page.click("button[type='submit'], input[type='submit'], #btnLogin")
     page.wait_for_load_state("networkidle")
 
     # 2. Navigate to Asset Enquiry Report and download file
     print("Downloading Asset Enquiry Report...")
-    page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport")
+    page.goto(
+        "https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport",
+        wait_until="networkidle",
+    )
 
     with page.expect_download() as download_info:
-      # Adjust selector if your download button has a specific ID or text
-      page.click("text=Export")
+      # Flexible click selector for export button
+      page.click(
+        "text=Export, text=Download, button:has-text('Export'),"
+        " #btnExport, .btn-export"
+      )
 
     download = download_info.value
     file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
@@ -53,7 +71,7 @@ def update_google_sheet(file_path):
   spreadsheet_id = "18QGSZZa-H5PucmrScf0B2gJ8VMfe6vhVE7wg_FkZtPY"
   sh = gc.open_by_key(spreadsheet_id)
 
-  # Access the "FAR Data" sheet
+  # Access the "FAR Data" worksheet
   worksheet = sh.worksheet("FAR Data")
 
   # Read downloaded Excel file
