@@ -7,6 +7,9 @@ from playwright.sync_api import sync_playwright
 FAMS_USER = os.getenv("FAMS_USER")
 FAMS_PASS = os.getenv("FAMS_PASS")
 GOOGLE_CREDS = os.getenv("GOOGLE_CREDENTIALS_JSON")
+# Company Code shown on the login screen ("VMART"). Not sensitive on its own,
+# but can be overridden via a FAMS_COMPANY_CODE secret/env var if needed.
+FAMS_COMPANY_CODE = os.getenv("FAMS_COMPANY_CODE", "VMART")
 
 DOWNLOAD_DIR = "./downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -38,13 +41,44 @@ def download_fams_report():
         print("0. Logging into FAMS...")
         page.goto("https://fams.vmart.co.in/WebfamsLive/Account/Login", wait_until="domcontentloaded")
 
-        user_input = page.wait_for_selector("input[name='Username'], input#Username, input[type='text']", timeout=20000)
+        print(f"   -> FAMS_USER length={len(FAMS_USER or '')}, FAMS_PASS length={len(FAMS_PASS or '')}")
+        if not FAMS_USER or not FAMS_PASS:
+            raise RuntimeError("FAMS_USER or FAMS_PASS secret is empty/unset. Check repo secrets.")
+
+        # The login form has THREE fields: Company Code, User Name, Password.
+        # A generic input[type='text'] selector matches Company Code first (wrong field),
+        # so we target each field by its label text instead.
+        company_input = page.locator("xpath=//label[contains(., 'Company Code')]/following::input[1]")
+        company_input.wait_for(state="visible", timeout=20000)
+        company_input.fill(FAMS_COMPANY_CODE)
+
+        user_input = page.locator("xpath=//label[contains(., 'User Name')]/following::input[1]")
+        user_input.wait_for(state="visible", timeout=20000)
         user_input.fill(FAMS_USER)
 
-        pass_input = page.wait_for_selector("input[name='Password'], input#Password, input[type='password']", timeout=20000)
+        pass_input = page.locator("xpath=//label[contains(., 'Password')]/following::input[1]")
+        pass_input.wait_for(state="visible", timeout=20000)
         pass_input.fill(FAMS_PASS)
 
-        page.click("button[type='submit'], input[type='submit'], #btnLogin")
+        debug_capture(page, "before_submit_click")
+
+        # There are TWO buttons: "SSO Login" and "Login". A generic
+        # button[type='submit'] selector can match SSO Login first since it
+        # appears earlier in the DOM. Target the "Login" button by its exact
+        # accessible name to avoid triggering the SSO flow by mistake.
+        login_button = page.get_by_role("button", name="Login", exact=True)
+        if login_button.count() == 0:
+            # Fallback in case it's rendered as <input type="submit" value="Login">
+            login_button = page.locator("input[type='submit'][value='Login' i]")
+        login_button.first.wait_for(state="visible", timeout=20000)
+
+        url_before_click = page.url
+        login_button.first.click()
+        try:
+            page.wait_for_url(lambda url: url != url_before_click, timeout=8000)
+            print("   -> URL changed after submit click, navigation happened.")
+        except Exception:
+            print("   -> URL did NOT change after submit click within 8s (button may not have submitted the form).")
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(2000)
 
