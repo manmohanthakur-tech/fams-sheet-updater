@@ -37,24 +37,24 @@ def download_fams_report():
         page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="domcontentloaded")
         page.wait_for_timeout(5000)
 
-        # 3. Click Show/Search via evaluate (bypasses element visibility issues)
+        # 3. Click Show/Search button
         print("Triggering Show/Search button...")
-        page.evaluate("""() => {
-            const btn = document.querySelector("input[value='Show'], button:has-text('Show'), input[value='Search'], #btnSearch, #btnShow, .btn, input[type='submit']");
-            if (btn) btn.click();
-        }""")
-        page.wait_for_timeout(8000)
+        show_selector = "input[value='Show'], button:has-text('Show'), input[value='Search'], button:has-text('Search'), #btnSearch, #btnShow, input[type='submit']"
+        try:
+            page.click(show_selector, timeout=10000, force=True)
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(5000)
+        except Exception as e:
+            print(f"Show step note: {e}")
 
         # 4. Attempt Export or Capture DOM Table
         print("Attempting Export / Data Extraction...")
         file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
 
         try:
+            export_selector = "img[title*='Excel'], img[src*='excel'], .fa-file-excel, #btnExport, #btnExcel, input[value*='Export']"
             with page.expect_download(timeout=10000) as download_info:
-                page.evaluate("""() => {
-                    const expBtn = document.querySelector("img[title*='Excel'], img[src*='excel'], .fa-file-excel, [onclick*='Export'], #btnExport, #btnExcel");
-                    if (expBtn) expBtn.click();
-                }""")
+                page.click(export_selector, timeout=10000, force=True)
             download = download_info.value
             download.save_as(file_path)
             print("Downloaded file successfully!")
@@ -85,13 +85,13 @@ def update_google_sheet(file_path):
         tables = pd.read_html(file_path, flavor='lxml')
         if not tables:
             raise ValueError("No table found on page. Check portal credentials/navigation.")
-        # Filter out tiny layout tables, pick the data table
+        # Filter out tiny layout tables, pick the largest table
         df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
     else:
         try:
             df = pd.read_excel(file_path)
         except Exception:
-            df = pd.read_html(file_path)[0]
+            df = pd.read_html(file_path, flavor='lxml')[0]
 
     # Store Filter logic (#664 onwards)
     store_col = [col for col in df.columns if 'store' in str(col).lower() or 'site' in str(col).lower() or 'location' in str(col).lower()]
