@@ -14,73 +14,104 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def download_fams_report():
   print("Starting browser automation...")
-  with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_context().new_page()
+  p = sync_playwright().start()
+  browser = p.chromium.launch(headless=True)
+  context = browser.new_context(accept_downloads=True)
+  page = context.new_page()
 
+  try:
     # 1. Login to FAMS Portal
     print("Navigating to FAMS login page...")
     page.goto(
-        "https://fams.vmart.co.in/WebfamsLive/Account/Login?ReturnUrl=%2fWebfamsLive%2f%3fDashboard%3d1&Dashboard=1",
-        wait_until="networkidle",
+        "https://fams.vmart.co.in/WebfamsLive/Account/Login",
+        wait_until="domcontentloaded",
     )
 
     user_input = page.wait_for_selector(
         "input[name='Username'], input#Username, input[type='text']",
-        timeout=15000,
+        timeout=20000,
     )
     user_input.fill(FAMS_USER)
 
     pass_input = page.wait_for_selector(
         "input[name='Password'], input#Password, input[type='password']",
-        timeout=15000,
+        timeout=20000,
     )
     pass_input.fill(FAMS_PASS)
 
     page.click("button[type='submit'], input[type='submit'], #btnLogin")
     page.wait_for_load_state("networkidle")
 
-    # 2. Navigate to Asset Enquiry Report
+    # 2. Go to Utilities -> Asset Enquiry Report
     print("Navigating to Asset Enquiry Report...")
     page.goto(
         "https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport",
-        wait_until="networkidle",
+        wait_until="domcontentloaded",
     )
     page.wait_for_timeout(4000)
 
-    # 3. Click Show / Search button first to generate the report view
-    print("Clicking Search / Show button...")
+    # 3. Select Stores (#664 onwards) if dropdown exists
     try:
-      show_btn = page.wait_for_selector(
-          "button:has-text('Show'), input[value='Show'],"
-          " button:has-text('Search'), input[value='Search'], #btnSearch,"
-          " #btnShow, .btn-primary",
-          timeout=10000,
+      store_select = page.query_selector(
+          "select[name*='Store'], select#StoreId, select#LocationId"
       )
-      show_btn.click()
-      page.wait_for_load_state("networkidle")
-      page.wait_for_timeout(5000)
+      if store_select:
+        options = page.eval_on_selector_all(
+            "select[name*='Store'] option, select#StoreId option",
+            "opts => opts.map(o => ({text: o.text, value: o.value}))",
+        )
+        selected_vals = []
+        for opt in options:
+          nums = [
+              int(s)
+              for s in opt["text"].replace("-", " ").split()
+              if s.isdigit()
+          ]
+          if nums and nums[0] >= 664:
+            selected_vals.append(opt["value"])
+        if selected_vals:
+          page.select_option(
+              "select[name*='Store'], select#StoreId", value=selected_vals
+          )
+          print(f"Selected {len(selected_vals)} stores starting from #664.")
     except Exception as e:
-      print(f"Notice: Show button step skipped or auto-loaded ({e})")
+      print(f"Store dropdown handling note: {e}")
 
-    # 4. Trigger Export Download
-    print("Exporting data to Excel...")
-    with page.expect_download(timeout=60000) as download_info:
-      # Click Export / Excel button
-      export_btn = page.wait_for_selector(
-          "button:has-text('Export'), a:has-text('Export'),"
-          " button:has-text('Excel'), a:has-text('Excel'), input[value='Export'],"
-          " .fa-file-excel, .fa-download, #btnExport, #btnExcel",
-          timeout=15000,
+    # 4. Click Show / Search
+    try:
+      show_btn = page.query_selector(
+          "input[value='Show'], button:has-text('Show'), input[value='Search'],"
+          " button:has-text('Search'), #btnSearch, #btnShow"
       )
-      export_btn.click()
+      if show_btn:
+        print("Clicking Show/Search...")
+        show_btn.click()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(4000)
+    except Exception as e:
+      print(f"Show button note: {e}")
+
+    # 5. Export Excel Download
+    print("Clicking Export to Excel...")
+    with page.expect_download(timeout=60000) as download_info:
+      # Target Export button, Excel icon, or link
+      export_selector = (
+          "a:has-text('Export'), button:has-text('Export'),"
+          " a:has-text('Excel'), button:has-text('Excel'),"
+          " input[value*='Export'], .fa-file-excel, .fa-download, #btnExport,"
+          " #btnExcel"
+      )
+      page.click(export_selector)
 
     download = download_info.value
     file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
     download.save_as(file_path)
     print(f"Report downloaded successfully to {file_path}")
-    browser.close()
     return file_path
+
+  finally:
+    browser.close()
+    p.stop()
 
 
 def update_google_sheet(file_path):
@@ -92,17 +123,18 @@ def update_google_sheet(file_path):
   sh = gc.open_by_key(spreadsheet_id)
   worksheet = sh.worksheet("FAR Data")
 
-  # Read Excel or HTML export
   try:
     df = pd.read_excel(file_path)
   except Exception:
     df = pd.read_html(file_path)[0]
 
-  # Filter Store Series #664 onwards safely in Python
+  # Python store filtering safety net (Store #664 onwards)
   store_col = [
       col
       for col in df.columns
-      if "store" in str(col).lower() or "site" in str(col).lower()
+      if "store" in str(col).lower()
+      or "site" in str(col).lower()
+      or "location" in str(col).lower()
   ]
   if store_col:
     col_name = store_col[0]
