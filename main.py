@@ -15,6 +15,29 @@ DOWNLOAD_DIR = "./downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
+def find_content_frame(page):
+    """
+    Return whichever frame (main page or an iframe) currently contains the
+    most form/report elements. Some legacy portals use a persistent 'shell'
+    page whose URL/title never change, loading the real UI into an iframe.
+    In that case document.querySelectorAll on `page` finds nothing, even
+    though the content is really there - just in a child frame.
+    """
+    best_frame = page.main_frame
+    best_score = -1
+    for frame in page.frames:
+        try:
+            score = frame.evaluate(
+                "document.querySelectorAll('select, table, input, button').length"
+            )
+        except Exception:
+            score = -1
+        if score > best_score:
+            best_score = score
+            best_frame = frame
+    return best_frame, best_score
+
+
 def debug_capture(page, label):
     """Save a screenshot + HTML snapshot so failures are diagnosable from CI artifacts."""
     try:
@@ -92,8 +115,8 @@ def download_fams_report():
                 "Check FAMS_USER/FAMS_PASS secrets, or whether the site is blocking this IP."
             )
 
-        # Step 1: Navigate to Asset Enquiry via the actual menu (the previous
-        # hardcoded URL guess was wrong and 404'd). Find whatever link/menu
+        # Step 1: Navigate to Asset Enquiry via the actual menu (a hardcoded
+        # direct URL was tried before and 404'd). Find whatever link/menu
         # item contains "Asset Enquiry" text and click it.
         print("1. Navigating to Utilities -> Asset Enquiry...")
         debug_capture(page, "index_before_navigate")
@@ -133,9 +156,22 @@ def download_fams_report():
         if "notfound" in page.url.lower() or "/error" in page.url.lower():
             raise RuntimeError(f"Navigation to Asset Enquiry ended up on an error page: {page.url}")
 
+        # The top-level URL/title often stay the same on this site even after
+        # real navigation happens, because content loads into a child iframe
+        # inside a persistent shell page. Find whichever frame actually holds
+        # the report UI and use THAT frame for every step from here on.
+        frame, score = find_content_frame(page)
+        print(f"   -> using content frame url={frame.url!r} (matched {score} select/table/input/button elements)")
+        if frame != page.main_frame:
+            try:
+                with open(os.path.join(DOWNLOAD_DIR, "debug_content_frame.html"), "w", encoding="utf-8") as f:
+                    f.write(frame.content())
+            except Exception as e:
+                print(f"   -> could not save content frame HTML: {e}")
+
         # Step 2: Select Branches dropdown (#664 onwards)
         print("2. Selecting initial Branches dropdown (#664 and above)...")
-        page.evaluate("""() => {
+        frame.evaluate("""() => {
             const selects = document.querySelectorAll("select");
             selects.forEach(s => {
                 Array.from(s.options).forEach(opt => {
@@ -167,7 +203,10 @@ def download_fams_report():
 
         # Step 3: Click 'Export Excel' (located next to Export CSV)
         print("3. Clicking 'Export Excel' (next to Export CSV)...")
-        clicked = page.evaluate("""() => {
+        # Re-find the content frame in case step 2's selection triggered a postback/reload.
+        frame, score = find_content_frame(page)
+        print(f"   -> using content frame url={frame.url!r} (matched {score} elements)")
+        clicked = frame.evaluate("""() => {
             const elements = Array.from(document.querySelectorAll("input, button, a, img, span"));
             const excelBtn = elements.find(e => {
                 const txt = (e.value || e.innerText || e.title || e.alt || '').toLowerCase();
@@ -193,7 +232,9 @@ def download_fams_report():
 
         # Step 4: Select stores under Branches dropdown (top right side) & wait for table data
         print("4. Selecting top-right Branches dropdown & waiting for table data...")
-        page.evaluate("""() => {
+        frame, score = find_content_frame(page)
+        print(f"   -> using content frame url={frame.url!r} (matched {score} elements)")
+        frame.evaluate("""() => {
             const selects = document.querySelectorAll("select");
             selects.forEach(s => {
                 Array.from(s.options).forEach(opt => {
@@ -223,25 +264,16 @@ def download_fams_report():
         page.wait_for_timeout(5000)
         debug_capture(page, "after_step4_top_right_branches")
 
-        # Also check every iframe on the page in case the report renders inside one
-        # (wait_for_selector on `page` only ever looks at the MAIN frame by default)
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                el_count = frame.evaluate("document.querySelectorAll('select, table').length")
-                print(f"   -> iframe {frame.url!r} has {el_count} select/table elements")
-            except Exception as e:
-                print(f"   -> could not inspect iframe {frame.url!r}: {e}")
-
         # Step 5: Click Export below the popped-out data
         print("5. Clicking Export button below popped-out data...")
         file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
+        frame, score = find_content_frame(page)
+        print(f"   -> using content frame url={frame.url!r} (matched {score} elements)")
 
         downloaded = False
         try:
             with page.expect_download(timeout=25000) as download_info:
-                page.evaluate("""() => {
+                frame.evaluate("""() => {
                     const btns = Array.from(document.querySelectorAll("input, button, a, img, span"));
                     const exportBtn = btns.reverse().find(b => {
                         const val = (b.value || b.innerText || b.title || b.alt || '').toLowerCase();
@@ -260,8 +292,11 @@ def download_fams_report():
         if not downloaded:
             print("Capturing rendered HTML table directly as fallback...")
             html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
+            # Use the CONTENT FRAME's html, not the shell page's, since that's
+            # where the actual table data lives.
+            frame, score = find_content_frame(page)
             with open(html_path, "w", encoding="utf-8") as f:
-                f.write(page.content())
+                f.write(frame.content())
             file_path = html_path
 
         return file_path
