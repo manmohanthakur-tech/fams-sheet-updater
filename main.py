@@ -92,11 +92,46 @@ def download_fams_report():
                 "Check FAMS_USER/FAMS_PASS secrets, or whether the site is blocking this IP."
             )
 
-        # Step 1: Navigate to Asset Enquiry
+        # Step 1: Navigate to Asset Enquiry via the actual menu (the previous
+        # hardcoded URL guess was wrong and 404'd). Find whatever link/menu
+        # item contains "Asset Enquiry" text and click it.
         print("1. Navigating to Utilities -> Asset Enquiry...")
-        page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiryReport", wait_until="networkidle")
+        debug_capture(page, "index_before_navigate")
+
+        clicked_text = page.evaluate("""() => {
+            const candidates = Array.from(document.querySelectorAll('a, li, span, div, button'));
+            // Prefer the most specific (smallest) element containing the text,
+            // to avoid clicking a huge container div.
+            let best = null;
+            for (const el of candidates) {
+                const txt = (el.innerText || '').trim().toLowerCase();
+                if (txt.includes('asset enquiry') || (txt.includes('asset') && txt.includes('enquiry'))) {
+                    if (!best || txt.length < (best.innerText || '').trim().length) {
+                        best = el;
+                    }
+                }
+            }
+            if (best) {
+                best.click();
+                return best.innerText.trim();
+            }
+            return null;
+        }""")
+        print(f"   -> menu item matched and clicked: {clicked_text!r}")
+
+        if not clicked_text:
+            debug_capture(page, "index_menu_item_not_found")
+            raise RuntimeError(
+                "Could not find an 'Asset Enquiry' menu link on the Index page. "
+                "Open debug_index_before_navigate.html from the artifacts to find the exact menu text/URL."
+            )
+
+        page.wait_for_load_state("networkidle")
         page.wait_for_timeout(3000)
         debug_capture(page, "after_navigate_asset_enquiry")
+
+        if "notfound" in page.url.lower() or "/error" in page.url.lower():
+            raise RuntimeError(f"Navigation to Asset Enquiry ended up on an error page: {page.url}")
 
         # Step 2: Select Branches dropdown (#664 onwards)
         print("2. Selecting initial Branches dropdown (#664 and above)...")
