@@ -183,8 +183,25 @@ def download_fams_report():
 
         # Step 3: Open the Branches multi-select and check every branch numbered >= 664
         print("3. Selecting Branches >= 664...")
-        branches_toggle = page.locator("xpath=//label[contains(., 'Branches')]/following::input[1]")
-        branches_toggle.first.click()
+        debug_capture(page, "before_branches_click")
+
+        # Prefer the placeholder ("Select") visible in the Branches widget -
+        # more precise than XPath following::, which can match ANY later
+        # input in the whole document (including hidden ones), not just the
+        # one actually next to the "Branches" label.
+        branches_toggle = page.get_by_placeholder("Select").first
+        if branches_toggle.count() == 0:
+            branches_toggle = page.locator("xpath=//label[contains(., 'Branches')]/following::input[1]").first
+
+        try:
+            branches_toggle.scroll_into_view_if_needed(timeout=10000)
+            branches_toggle.click(timeout=20000)
+        except Exception as e:
+            print(f"   -> Branches toggle click failed ({e}); retrying with a fresh locator...")
+            debug_capture(page, "branches_click_failed_retry")
+            branches_toggle = page.locator("xpath=//label[contains(., 'Branches')]/following::input[1]").first
+            branches_toggle.click(timeout=20000, force=True)
+
         page.wait_for_timeout(1000)
         debug_capture(page, "branches_dropdown_open")
 
