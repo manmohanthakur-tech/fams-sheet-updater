@@ -15,29 +15,6 @@ DOWNLOAD_DIR = "./downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def find_content_frame(page):
-    """
-    Return whichever frame (main page or an iframe) currently contains the
-    most form/report elements. Some legacy portals use a persistent 'shell'
-    page whose URL/title never change, loading the real UI into an iframe.
-    In that case document.querySelectorAll on `page` finds nothing, even
-    though the content is really there - just in a child frame.
-    """
-    best_frame = page.main_frame
-    best_score = -1
-    for frame in page.frames:
-        try:
-            score = frame.evaluate(
-                "document.querySelectorAll('select, table, input, button').length"
-            )
-        except Exception:
-            score = -1
-        if score > best_score:
-            best_score = score
-            best_frame = frame
-    return best_frame, best_score
-
-
 def debug_capture(page, label):
     """Save a screenshot + HTML snapshot so failures are diagnosable from CI artifacts."""
     try:
@@ -156,131 +133,84 @@ def download_fams_report():
         if "notfound" in page.url.lower() or "/error" in page.url.lower():
             raise RuntimeError(f"Navigation to Asset Enquiry ended up on an error page: {page.url}")
 
-        # The top-level URL/title often stay the same on this site even after
-        # real navigation happens, because content loads into a child iframe
-        # inside a persistent shell page. Find whichever frame actually holds
-        # the report UI and use THAT frame for every step from here on.
-        frame, score = find_content_frame(page)
-        print(f"   -> using content frame url={frame.url!r} (matched {score} select/table/input/button elements)")
-        if frame != page.main_frame:
-            try:
-                with open(os.path.join(DOWNLOAD_DIR, "debug_content_frame.html"), "w", encoding="utf-8") as f:
-                    f.write(frame.content())
-            except Exception as e:
-                print(f"   -> could not save content frame HTML: {e}")
-
-        # Step 2: Select Branches dropdown (#664 onwards)
-        print("2. Selecting initial Branches dropdown (#664 and above)...")
-        frame.evaluate("""() => {
-            const selects = document.querySelectorAll("select");
-            selects.forEach(s => {
-                Array.from(s.options).forEach(opt => {
-                    const txt = opt.text || opt.value || '';
-                    const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
-                    if (nums.length > 0 && nums[0] >= 664) {
-                        opt.selected = true;
-                    }
-                });
-                s.dispatchEvent(new Event('change', { bubbles: true }));
-            });
-
-            const checkboxes = document.querySelectorAll("input[type='checkbox']");
-            checkboxes.forEach(cb => {
-                const label = cb.closest('label') || cb.parentElement;
-                const txt = label ? label.innerText : cb.value || '';
-                const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
-                if (nums.length > 0 && nums[0] >= 664) {
-                    if (!cb.checked) {
-                        cb.click();
-                        cb.checked = true;
-                        cb.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }
-            });
-        }""")
+        # Step 2: Switch to "Export Excel" mode. This is a radio button, and
+        # clicking it is what REVEALS the Branches-driven Search button, the
+        # live data table, and the Export button - none of those exist while
+        # "Export CSV" (the default) is selected.
+        print("2. Selecting 'Export Excel' option...")
+        export_excel_option = page.get_by_text("Export Excel", exact=True).first
+        export_excel_option.wait_for(state="visible", timeout=15000)
+        export_excel_option.click()
         page.wait_for_timeout(2000)
-        debug_capture(page, "after_step2_branches")
+        debug_capture(page, "after_select_export_excel_mode")
 
-        # Step 3: Click 'Export Excel' (located next to Export CSV)
-        print("3. Clicking 'Export Excel' (next to Export CSV)...")
-        # Re-find the content frame in case step 2's selection triggered a postback/reload.
-        frame, score = find_content_frame(page)
-        print(f"   -> using content frame url={frame.url!r} (matched {score} elements)")
-        clicked = frame.evaluate("""() => {
-            const elements = Array.from(document.querySelectorAll("input, button, a, img, span"));
-            const excelBtn = elements.find(e => {
-                const txt = (e.value || e.innerText || e.title || e.alt || '').toLowerCase();
-                return txt.includes('excel') || (txt.includes('export') && !txt.includes('csv'));
-            });
-            if (excelBtn) {
-                excelBtn.click();
-                return true;
-            }
-            return false;
-        }""")
-        print(f"   -> Export Excel button found and clicked: {clicked}")
-        page.wait_for_timeout(5000)
-        debug_capture(page, "after_step3_export_excel_click")
+        # Confirms the Excel-mode UI (Search button etc.) actually rendered
+        page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=15000)
 
-        # Step 3b: Check if Export Excel opened a NEW TAB instead of a modal.
-        # If so, switch `page` to that new tab so subsequent steps operate on the right place.
-        if len(context.pages) > 1:
-            print("   -> New tab/page detected after Export Excel click, switching context to it.")
-            page = context.pages[-1]
-            page.wait_for_load_state("domcontentloaded")
-            debug_capture(page, "after_step3_new_tab")
+        # Step 3: Open the Branches multi-select and check every branch numbered >= 664
+        print("3. Selecting Branches >= 664...")
+        branches_toggle = page.locator("xpath=//label[contains(., 'Branches')]/following::input[1]")
+        branches_toggle.first.click()
+        page.wait_for_timeout(1000)
+        debug_capture(page, "branches_dropdown_open")
 
-        # Step 4: Select stores under Branches dropdown (top right side) & wait for table data
-        print("4. Selecting top-right Branches dropdown & waiting for table data...")
-        frame, score = find_content_frame(page)
-        print(f"   -> using content frame url={frame.url!r} (matched {score} elements)")
-        frame.evaluate("""() => {
-            const selects = document.querySelectorAll("select");
-            selects.forEach(s => {
-                Array.from(s.options).forEach(opt => {
-                    const txt = opt.text || opt.value || '';
-                    const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
-                    if (nums.length > 0 && nums[0] >= 664) {
-                        opt.selected = true;
-                    }
-                });
-                s.dispatchEvent(new Event('change', { bubbles: true }));
-            });
-
-            const checkboxes = document.querySelectorAll("input[type='checkbox']");
+        selected_count = page.evaluate("""() => {
+            const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
+            let count = 0;
             checkboxes.forEach(cb => {
                 const label = cb.closest('label') || cb.parentElement;
-                const txt = label ? label.innerText : cb.value || '';
-                const nums = txt.replace(/[-_]/g, ' ').split(' ').map(v => parseInt(v)).filter(v => !isNaN(v));
-                if (nums.length > 0 && nums[0] >= 664) {
+                const txt = (label ? label.innerText : cb.value) || '';
+                const match = txt.match(/#?(\\d+)/);
+                if (match && parseInt(match[1], 10) >= 664) {
                     if (!cb.checked) {
                         cb.click();
-                        cb.checked = true;
-                        cb.dispatchEvent(new Event('change', { bubbles: true }));
                     }
+                    count++;
                 }
             });
+            return count;
         }""")
-        page.wait_for_timeout(5000)
-        debug_capture(page, "after_step4_top_right_branches")
+        print(f"   -> Branches matched and checked (>= 664): {selected_count}")
 
-        # Step 5: Click Export below the popped-out data
-        print("5. Clicking Export button below popped-out data...")
+        if selected_count == 0:
+            debug_capture(page, "no_branches_matched")
+            raise RuntimeError(
+                "No branches numbered >= 664 were found/checked. "
+                "Open debug_branches_dropdown_open.html from the artifacts to inspect the branch list markup."
+            )
+
+        # Close the dropdown so it doesn't overlap the Search/Export buttons
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+        debug_capture(page, "after_branch_selection")
+
+        # Step 4: Click Search and wait for the table to actually populate
+        print("4. Clicking Search and waiting for table data...")
+        page.get_by_role("button", name="Search", exact=True).click()
+        try:
+            page.wait_for_function(
+                """() => {
+                    const table = document.querySelector('table');
+                    if (!table) return false;
+                    const bodyText = table.innerText || '';
+                    return !bodyText.includes('No data available in table')
+                        && table.querySelectorAll('tbody tr').length > 0;
+                }""",
+                timeout=30000,
+            )
+            print("   -> Table populated with data.")
+        except Exception as e:
+            print(f"   -> Table did not appear to populate within 30s: {e}")
+        debug_capture(page, "after_search_table_loaded")
+
+        # Step 5: Click Export and capture the download
+        print("5. Clicking Export button...")
         file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
-        frame, score = find_content_frame(page)
-        print(f"   -> using content frame url={frame.url!r} (matched {score} elements)")
 
         downloaded = False
         try:
-            with page.expect_download(timeout=25000) as download_info:
-                frame.evaluate("""() => {
-                    const btns = Array.from(document.querySelectorAll("input, button, a, img, span"));
-                    const exportBtn = btns.reverse().find(b => {
-                        const val = (b.value || b.innerText || b.title || b.alt || '').toLowerCase();
-                        return val === 'export' || val.includes('export');
-                    });
-                    if (exportBtn) exportBtn.click();
-                }""")
+            with page.expect_download(timeout=30000) as download_info:
+                page.get_by_role("button", name="Export", exact=True).click()
             download = download_info.value
             download.save_as(file_path)
             downloaded = True
@@ -292,11 +222,8 @@ def download_fams_report():
         if not downloaded:
             print("Capturing rendered HTML table directly as fallback...")
             html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
-            # Use the CONTENT FRAME's html, not the shell page's, since that's
-            # where the actual table data lives.
-            frame, score = find_content_frame(page)
             with open(html_path, "w", encoding="utf-8") as f:
-                f.write(frame.content())
+                f.write(page.content())
             file_path = html_path
 
         return file_path
