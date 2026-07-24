@@ -224,9 +224,26 @@ def download_fams_report():
         page.wait_for_timeout(500)
         debug_capture(page, "after_branch_selection")
 
+        # Checking 206 branch checkboxes fires that many change-triggered
+        # background calls, which can leave a loading overlay up for a while.
+        # Wait for it to clear before trying to interact with Search -
+        # otherwise the click just gets blocked ("subtree intercepts pointer
+        # events") and retries until Playwright's default timeout runs out.
+        print("   -> Waiting for any loading overlay to clear before Search...")
+        try:
+            page.wait_for_selector(
+                "#loading-block .loading-indicator, .loading-indicator",
+                state="hidden",
+                timeout=90000,
+            )
+            print("   -> Loading overlay cleared.")
+        except Exception as e:
+            print(f"   -> Loading overlay did not clear within 90s ({e}); attempting Search click anyway.")
+        debug_capture(page, "before_search_click")
+
         # Step 4: Click Search and wait for the table to actually populate
         print("4. Clicking Search and waiting for table data...")
-        page.get_by_role("button", name="Search", exact=True).click()
+        page.get_by_role("button", name="Search", exact=True).click(timeout=60000)
         try:
             page.wait_for_function(
                 """() => {
