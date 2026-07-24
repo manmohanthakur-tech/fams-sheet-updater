@@ -93,42 +93,72 @@ def download_fams_report():
             )
 
         # Step 1: Navigate to Asset Enquiry via the actual menu (a hardcoded
-        # direct URL was tried before and 404'd). Find whatever link/menu
-        # item contains "Asset Enquiry" text and click it.
+        # direct URL was tried before and 404'd).
+        #
+        # A prior JS-based approach (finding any element containing "Asset
+        # Enquiry" text and calling .click() on it) was unreliable: when the
+        # menu is <li><a>Asset Enquiry</a></li>, the <li> and <a> can have
+        # identical text, and clicking the <li> instead of the <a> fires no
+        # navigation at all - with no error, since .click() "succeeds" either
+        # way. That caused silent no-op failures in some runs.
+        #
+        # Instead: open the "Utilities" menu with a real click, click the
+        # actual link, and then VERIFY navigation actually happened by
+        # waiting for a marker that only exists on the real Asset Enquiry
+        # page (the "Export CSV" / "Export Excel" radio options) rather than
+        # trusting that the click "worked".
         print("1. Navigating to Utilities -> Asset Enquiry...")
         debug_capture(page, "index_before_navigate")
 
-        clicked_text = page.evaluate("""() => {
-            const candidates = Array.from(document.querySelectorAll('a, li, span, div, button'));
-            // Prefer the most specific (smallest) element containing the text,
-            // to avoid clicking a huge container div.
-            let best = null;
-            for (const el of candidates) {
-                const txt = (el.innerText || '').trim().toLowerCase();
-                if (txt.includes('asset enquiry') || (txt.includes('asset') && txt.includes('enquiry'))) {
-                    if (!best || txt.length < (best.innerText || '').trim().length) {
-                        best = el;
-                    }
-                }
-            }
-            if (best) {
-                best.click();
-                return best.innerText.trim();
-            }
-            return null;
-        }""")
-        print(f"   -> menu item matched and clicked: {clicked_text!r}")
+        def open_utilities_and_click_asset_enquiry():
+            utilities_menu = page.get_by_text("Utilities", exact=True).first
+            utilities_menu.wait_for(state="visible", timeout=15000)
+            utilities_menu.click()
+            page.wait_for_timeout(500)
 
-        if not clicked_text:
-            debug_capture(page, "index_menu_item_not_found")
-            raise RuntimeError(
-                "Could not find an 'Asset Enquiry' menu link on the Index page. "
-                "Open debug_index_before_navigate.html from the artifacts to find the exact menu text/URL."
-            )
+            asset_enquiry_link = page.locator("a").filter(has_text="Asset Enquiry")
+            # Exclude "Asset Ageing Enquiry" / anything longer that also matches
+            asset_enquiry_link = asset_enquiry_link.get_by_text("Asset Enquiry", exact=True)
+            if asset_enquiry_link.count() == 0:
+                # Fallback: some menus render the item as non-<a> too
+                asset_enquiry_link = page.get_by_text("Asset Enquiry", exact=True)
+            asset_enquiry_link.first.wait_for(state="visible", timeout=15000)
+            asset_enquiry_link.first.click()
 
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(3000)
+        navigated = False
+        for attempt in (1, 2):
+            try:
+                open_utilities_and_click_asset_enquiry()
+            except Exception as e:
+                print(f"   -> attempt {attempt}: could not click Asset Enquiry menu item ({e})")
+                debug_capture(page, f"menu_click_failed_attempt{attempt}")
+                continue
+
+            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+
+            # Verify navigation actually happened: look for the Export
+            # CSV/Excel radios that only exist on the real Asset Enquiry page.
+            try:
+                page.get_by_text("Export CSV", exact=True).first.wait_for(state="visible", timeout=8000)
+                navigated = True
+                print(f"   -> attempt {attempt}: navigation to Asset Enquiry confirmed (Export CSV visible).")
+                break
+            except Exception:
+                print(f"   -> attempt {attempt}: click did not result in real navigation (still no Export CSV option).")
+                debug_capture(page, f"navigation_not_confirmed_attempt{attempt}")
+
         debug_capture(page, "after_navigate_asset_enquiry")
+
+        if not navigated:
+            raise RuntimeError(
+                "Clicked 'Asset Enquiry' but the page never actually navigated there "
+                "(Export CSV/Export Excel options never appeared) after 2 attempts. "
+                "Check debug_navigation_not_confirmed_attempt*.png to see what's on screen."
+            )
 
         if "notfound" in page.url.lower() or "/error" in page.url.lower():
             raise RuntimeError(f"Navigation to Asset Enquiry ended up on an error page: {page.url}")
@@ -136,36 +166,14 @@ def download_fams_report():
         # Step 2: Switch to "Export Excel" mode. This is a radio button, and
         # clicking it is what REVEALS the Branches-driven Search button, the
         # live data table, and the Export button - none of those exist while
-        # "Export CSV" (the default) is selected.
+        # "Export CSV" (the default) is selected. We already confirmed
+        # "Export CSV" is visible above, so "Export Excel" (right next to it)
+        # should be too - this is just a normal wait, not a recovery path.
         print("2. Selecting 'Export Excel' option...")
         debug_capture(page, "before_export_excel_wait")
 
         export_excel_option = page.get_by_text("Export Excel", exact=True).first
-        try:
-            export_excel_option.wait_for(state="visible", timeout=30000)
-        except Exception as e:
-            # Transient slow load, or the earlier menu click silently didn't
-            # register. Capture evidence, try clicking "Asset Enquiry" again
-            # as a one-shot recovery, then give it one more chance.
-            print(f"   -> 'Export Excel' not visible after 30s ({e}); retrying menu click once...")
-            debug_capture(page, "export_excel_not_found_retry")
-            page.evaluate("""() => {
-                const candidates = Array.from(document.querySelectorAll('a, li, span, div, button'));
-                let best = null;
-                for (const el of candidates) {
-                    const txt = (el.innerText || '').trim().toLowerCase();
-                    if (txt.includes('asset enquiry') || (txt.includes('asset') && txt.includes('enquiry'))) {
-                        if (!best || txt.length < (best.innerText || '').trim().length) {
-                            best = el;
-                        }
-                    }
-                }
-                if (best) best.click();
-            }""")
-            page.wait_for_timeout(3000)
-            export_excel_option = page.get_by_text("Export Excel", exact=True).first
-            export_excel_option.wait_for(state="visible", timeout=30000)
-
+        export_excel_option.wait_for(state="visible", timeout=15000)
         export_excel_option.click()
         page.wait_for_timeout(2000)
         debug_capture(page, "after_select_export_excel_mode")
