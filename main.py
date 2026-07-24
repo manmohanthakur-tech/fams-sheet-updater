@@ -138,14 +138,40 @@ def download_fams_report():
         # live data table, and the Export button - none of those exist while
         # "Export CSV" (the default) is selected.
         print("2. Selecting 'Export Excel' option...")
+        debug_capture(page, "before_export_excel_wait")
+
         export_excel_option = page.get_by_text("Export Excel", exact=True).first
-        export_excel_option.wait_for(state="visible", timeout=15000)
+        try:
+            export_excel_option.wait_for(state="visible", timeout=30000)
+        except Exception as e:
+            # Transient slow load, or the earlier menu click silently didn't
+            # register. Capture evidence, try clicking "Asset Enquiry" again
+            # as a one-shot recovery, then give it one more chance.
+            print(f"   -> 'Export Excel' not visible after 30s ({e}); retrying menu click once...")
+            debug_capture(page, "export_excel_not_found_retry")
+            page.evaluate("""() => {
+                const candidates = Array.from(document.querySelectorAll('a, li, span, div, button'));
+                let best = null;
+                for (const el of candidates) {
+                    const txt = (el.innerText || '').trim().toLowerCase();
+                    if (txt.includes('asset enquiry') || (txt.includes('asset') && txt.includes('enquiry'))) {
+                        if (!best || txt.length < (best.innerText || '').trim().length) {
+                            best = el;
+                        }
+                    }
+                }
+                if (best) best.click();
+            }""")
+            page.wait_for_timeout(3000)
+            export_excel_option = page.get_by_text("Export Excel", exact=True).first
+            export_excel_option.wait_for(state="visible", timeout=30000)
+
         export_excel_option.click()
         page.wait_for_timeout(2000)
         debug_capture(page, "after_select_export_excel_mode")
 
         # Confirms the Excel-mode UI (Search button etc.) actually rendered
-        page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=15000)
+        page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=30000)
 
         # Step 3: Open the Branches multi-select and check every branch numbered >= 664
         print("3. Selecting Branches >= 664...")
