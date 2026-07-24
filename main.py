@@ -181,29 +181,17 @@ def download_fams_report():
         # Confirms the Excel-mode UI (Search button etc.) actually rendered
         page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=30000)
 
-        # Step 3: Open the Branches multi-select and check every branch numbered >= 664
+        # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
+        # NOTE: we deliberately do NOT click a toggle to "open" the dropdown
+        # first. The checkboxes already exist in the DOM (just visually
+        # collapsed), and a real .click() on a checkbox fires its change
+        # handlers regardless of whether the parent panel is visible - this
+        # is what worked in earlier successful runs. Trying to click a UI
+        # toggle to open the panel turned out to be fragile (the widget isn't
+        # a plain <input>, so locating a reliable toggle element was
+        # unreliable) and added a failure point we don't actually need.
         print("3. Selecting Branches >= 664...")
-        debug_capture(page, "before_branches_click")
-
-        # Prefer the placeholder ("Select") visible in the Branches widget -
-        # more precise than XPath following::, which can match ANY later
-        # input in the whole document (including hidden ones), not just the
-        # one actually next to the "Branches" label.
-        branches_toggle = page.get_by_placeholder("Select").first
-        if branches_toggle.count() == 0:
-            branches_toggle = page.locator("xpath=//label[contains(., 'Branches')]/following::input[1]").first
-
-        try:
-            branches_toggle.scroll_into_view_if_needed(timeout=10000)
-            branches_toggle.click(timeout=20000)
-        except Exception as e:
-            print(f"   -> Branches toggle click failed ({e}); retrying with a fresh locator...")
-            debug_capture(page, "branches_click_failed_retry")
-            branches_toggle = page.locator("xpath=//label[contains(., 'Branches')]/following::input[1]").first
-            branches_toggle.click(timeout=20000, force=True)
-
-        page.wait_for_timeout(1000)
-        debug_capture(page, "branches_dropdown_open")
+        debug_capture(page, "before_branches_select")
 
         selected_count = page.evaluate("""() => {
             const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
@@ -222,12 +210,13 @@ def download_fams_report():
             return count;
         }""")
         print(f"   -> Branches matched and checked (>= 664): {selected_count}")
+        debug_capture(page, "after_branches_select")
 
         if selected_count == 0:
             debug_capture(page, "no_branches_matched")
             raise RuntimeError(
                 "No branches numbered >= 664 were found/checked. "
-                "Open debug_branches_dropdown_open.html from the artifacts to inspect the branch list markup."
+                "Open debug_after_branches_select.html from the artifacts to inspect the branch list markup."
             )
 
         # Close the dropdown so it doesn't overlap the Search/Export buttons
