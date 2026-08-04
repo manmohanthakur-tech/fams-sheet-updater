@@ -183,30 +183,43 @@ def download_fams_report():
 
         # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
         # NOTE: we deliberately do NOT click a toggle to "open" the dropdown
-        # first. The checkboxes already exist in the DOM (just visually
-        # collapsed), and a real .click() on a checkbox fires its change
-        # handlers regardless of whether the parent panel is visible - this
-        # is what worked in earlier successful runs. Trying to click a UI
-        # toggle to open the panel turned out to be fragile (the widget isn't
-        # a plain <input>, so locating a reliable toggle element was
-        # unreliable) and added a failure point we don't actually need.
+        # first - the checkboxes already exist in the DOM (just visually
+        # collapsed), and setting their state works regardless of the panel's
+        # visibility.
+        #
+        # IMPORTANT: we also deliberately do NOT call .click() on every
+        # matching checkbox. Firing ~200 click events in one synchronous
+        # burst fires that many near-simultaneous onChange-triggered
+        # background requests, which appears to overwhelm the page's own
+        # handler and leave its loading overlay permanently stuck (confirmed:
+        # it never cleared even after 150s of waiting - not a speed problem,
+        # a state problem). Instead we set .checked directly on every
+        # matching box (which fires no events at all) and dispatch exactly
+        # ONE bubbling 'change' event at the end, so any delegated listener
+        # re-reads the final selection state a single time - the way it
+        # would if a user finished a bulk selection rather than clicking 206
+        # times instantly.
         print("3. Selecting Branches >= 664...")
         debug_capture(page, "before_branches_select")
 
         selected_count = page.evaluate("""() => {
             const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
             let count = 0;
+            let lastMatched = null;
             checkboxes.forEach(cb => {
                 const label = cb.closest('label') || cb.parentElement;
                 const txt = (label ? label.innerText : cb.value) || '';
                 const match = txt.match(/#?(\\d+)/);
                 if (match && parseInt(match[1], 10) >= 664) {
-                    if (!cb.checked) {
-                        cb.click();
-                    }
+                    cb.checked = true;
                     count++;
+                    lastMatched = cb;
                 }
             });
+            if (lastMatched) {
+                lastMatched.dispatchEvent(new Event('change', { bubbles: true }));
+                lastMatched.dispatchEvent(new Event('input', { bubbles: true }));
+            }
             return count;
         }""")
         print(f"   -> Branches matched and checked (>= 664): {selected_count}")
@@ -234,11 +247,11 @@ def download_fams_report():
             page.wait_for_selector(
                 "#loading-block .loading-indicator, .loading-indicator",
                 state="hidden",
-                timeout=90000,
+                timeout=30000,
             )
             print("   -> Loading overlay cleared.")
         except Exception as e:
-            print(f"   -> Loading overlay did not clear within 90s ({e}); attempting Search click anyway.")
+            print(f"   -> Loading overlay did not clear within 30s ({e}); attempting Search click anyway.")
         debug_capture(page, "before_search_click")
 
         # Step 4: Click Search and wait for the table to actually populate
