@@ -184,42 +184,69 @@ def download_fams_report():
         # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
         # NOTE: we deliberately do NOT click a toggle to "open" the dropdown
         # first - the checkboxes already exist in the DOM (just visually
-        # collapsed), and setting their state works regardless of the panel's
-        # visibility.
+        # collapsed), and clicking works regardless of the panel's visibility.
         #
-        # IMPORTANT: we also deliberately do NOT call .click() on every
-        # matching checkbox. Firing ~200 click events in one synchronous
-        # burst fires that many near-simultaneous onChange-triggered
-        # background requests, which appears to overwhelm the page's own
-        # handler and leave its loading overlay permanently stuck (confirmed:
-        # it never cleared even after 150s of waiting - not a speed problem,
-        # a state problem). Instead we set .checked directly on every
-        # matching box (which fires no events at all) and dispatch exactly
-        # ONE bubbling 'change' event at the end, so any delegated listener
-        # re-reads the final selection state a single time - the way it
-        # would if a user finished a bulk selection rather than clicking 206
-        # times instantly.
+        # IMPORTANT on HOW we click: two approaches were tried and both had
+        # problems:
+        #   1) Firing .click() on all ~200 matching checkboxes in one
+        #      synchronous JS burst overwhelmed the page's own handler and
+        #      left its loading overlay permanently stuck (confirmed: never
+        #      cleared even after 150s).
+        #   2) Setting .checked directly + firing one synthetic 'change'
+        #      event avoided the hang, but the widget apparently tracks
+        #      selection in its own internal JS state (not by reading
+        #      checkbox.checked from the DOM) - so nothing was actually
+        #      registered as selected, and Search returned near-empty
+        #      results (confirmed: only 11 leftover rows, not thousands).
+        #
+        # Fix: real .click() events (so the widget's own selection logic
+        # actually fires), but spaced out with a real small delay between
+        # each one from the Python side - not a synchronous burst. This is
+        # slower (~200 round trips) but avoids both failure modes.
         print("3. Selecting Branches >= 664...")
         debug_capture(page, "before_branches_select")
+
+        matching_indices = page.evaluate("""() => {
+            const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
+            const indices = [];
+            checkboxes.forEach((cb, idx) => {
+                const label = cb.closest('label') || cb.parentElement;
+                const txt = (label ? label.innerText : cb.value) || '';
+                const match = txt.match(/#?(\\d+)/);
+                if (match && parseInt(match[1], 10) >= 664 && !cb.checked) {
+                    indices.push(idx);
+                }
+            });
+            return indices;
+        }""")
+        print(f"   -> Branches to select (>= 664): {len(matching_indices)}")
+
+        for i, idx in enumerate(matching_indices):
+            page.evaluate(
+                """(idx) => {
+                    const checkboxes = document.querySelectorAll("input[type='checkbox']");
+                    const cb = checkboxes[idx];
+                    if (cb && !cb.checked) cb.click();
+                }""",
+                idx,
+            )
+            # Small real delay every few clicks so we don't fire a burst of
+            # near-simultaneous background requests, without making 206
+            # individual waits prohibitively slow.
+            if i % 5 == 4:
+                page.wait_for_timeout(150)
 
         selected_count = page.evaluate("""() => {
             const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
             let count = 0;
-            let lastMatched = null;
             checkboxes.forEach(cb => {
                 const label = cb.closest('label') || cb.parentElement;
                 const txt = (label ? label.innerText : cb.value) || '';
                 const match = txt.match(/#?(\\d+)/);
-                if (match && parseInt(match[1], 10) >= 664) {
-                    cb.checked = true;
+                if (match && parseInt(match[1], 10) >= 664 && cb.checked) {
                     count++;
-                    lastMatched = cb;
                 }
             });
-            if (lastMatched) {
-                lastMatched.dispatchEvent(new Event('change', { bubbles: true }));
-                lastMatched.dispatchEvent(new Event('input', { bubbles: true }));
-            }
             return count;
         }""")
         print(f"   -> Branches matched and checked (>= 664): {selected_count}")
@@ -257,6 +284,7 @@ def download_fams_report():
         # Step 4: Click Search and wait for the table to actually populate
         print("4. Clicking Search and waiting for table data...")
         page.get_by_role("button", name="Search", exact=True).click(timeout=60000)
+        table_populated = False
         try:
             page.wait_for_function(
                 """() => {
@@ -266,12 +294,20 @@ def download_fams_report():
                     return !bodyText.includes('No data available in table')
                         && table.querySelectorAll('tbody tr').length > 0;
                 }""",
-                timeout=30000,
+                timeout=60000,
             )
+            table_populated = True
             print("   -> Table populated with data.")
         except Exception as e:
-            print(f"   -> Table did not appear to populate within 30s: {e}")
+            print(f"   -> Table did not appear to populate within 60s: {e}")
         debug_capture(page, "after_search_table_loaded")
+
+        if not table_populated:
+            raise RuntimeError(
+                "Search ran but the results table never populated with real data. "
+                "Check debug_after_search_table_loaded.png / .html to see what's on screen - "
+                "likely the branch selection didn't actually register with the site's search query."
+            )
 
         # Step 5: Click Export and capture the download
         print("5. Clicking Export button...")
@@ -279,8 +315,8 @@ def download_fams_report():
 
         downloaded = False
         try:
-            with page.expect_download(timeout=30000) as download_info:
-                page.get_by_role("button", name="Export", exact=True).click()
+            with page.expect_download(timeout=90000) as download_info:
+                page.get_by_role("button", name="Export", exact=True).click(timeout=30000)
             download = download_info.value
             download.save_as(file_path)
             downloaded = True
@@ -290,11 +326,21 @@ def download_fams_report():
             debug_capture(page, "step5_download_failed")
 
         if not downloaded:
-            print("Capturing rendered HTML table directly as fallback...")
-            html_path = os.path.join(DOWNLOAD_DIR, "asset_report.html")
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(page.content())
-            file_path = html_path
+            # IMPORTANT: do NOT silently fall back to scraping the on-screen
+            # HTML table. That fallback only ever captures whatever small
+            # preview/leftover table happens to be visible (confirmed twice:
+            # it produced ~11 rows with a different, wrong column set,
+            # while still reporting "success" and overwriting the Google
+            # Sheet with bad data). A failed real download means something
+            # is genuinely wrong upstream - better to fail the run loudly
+            # than silently corrupt the sheet with incomplete data.
+            debug_capture(page, "download_failed_fatal")
+            raise RuntimeError(
+                "Real file download never triggered/completed. Refusing to fall back to "
+                "scraping the on-screen HTML table, since that has previously produced "
+                "incomplete/wrong data while still 'succeeding'. Check debug_download_failed_fatal.png "
+                "and debug_after_search_table_loaded.png to see what was on screen."
+            )
 
         return file_path
 
