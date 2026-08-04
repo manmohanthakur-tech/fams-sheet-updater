@@ -186,23 +186,30 @@ def download_fams_report():
         # first - the checkboxes already exist in the DOM (just visually
         # collapsed), and clicking works regardless of the panel's visibility.
         #
-        # IMPORTANT on HOW we click: two approaches were tried and both had
-        # problems:
+        # IMPORTANT on HOW we click: three approaches were tried:
         #   1) Firing .click() on all ~200 matching checkboxes in one
-        #      synchronous JS burst overwhelmed the page's own handler and
-        #      left its loading overlay permanently stuck (confirmed: never
-        #      cleared even after 150s).
+        #      synchronous JS burst overwhelmed the page and left its
+        #      loading overlay permanently stuck (confirmed: never cleared
+        #      even after 150s).
         #   2) Setting .checked directly + firing one synthetic 'change'
-        #      event avoided the hang, but the widget apparently tracks
-        #      selection in its own internal JS state (not by reading
-        #      checkbox.checked from the DOM) - so nothing was actually
-        #      registered as selected, and Search returned near-empty
-        #      results (confirmed: only 11 leftover rows, not thousands).
+        #      event avoided the hang, but the widget tracks selection in
+        #      its own internal JS state (not by reading checkbox.checked
+        #      from the DOM) - nothing was actually registered as selected,
+        #      and Search returned near-empty results (confirmed: only 11
+        #      leftover rows).
+        #   3) Real .click() events with light spacing (pause every 5
+        #      clicks) correctly registered the selection (203/206
+        #      confirmed checked), but STILL left the overlay permanently
+        #      stuck - light spacing wasn't enough to prevent overlapping
+        #      in-flight requests.
         #
-        # Fix: real .click() events (so the widget's own selection logic
-        # actually fires), but spaced out with a real small delay between
-        # each one from the Python side - not a synchronous burst. This is
-        # slower (~200 round trips) but avoids both failure modes.
+        # Fix: fully SEQUENTIAL clicking - click one checkbox, then
+        # explicitly wait for the loading overlay to clear before clicking
+        # the next one. This guarantees at most one request in flight at a
+        # time. Slower (~200 round trips, each waiting on the page), but
+        # this is the only approach that avoids both failure modes: real
+        # clicks (so selection actually registers) with no overlap
+        # (so the overlay never gets stuck).
         print("3. Selecting Branches >= 664...")
         debug_capture(page, "before_branches_select")
 
@@ -219,8 +226,10 @@ def download_fams_report():
             });
             return indices;
         }""")
-        print(f"   -> Branches to select (>= 664): {len(matching_indices)}")
+        total_to_select = len(matching_indices)
+        print(f"   -> Branches to select (>= 664): {total_to_select}")
 
+        LOADING_SELECTOR = "#loading-block .loading-indicator, .loading-indicator"
         for i, idx in enumerate(matching_indices):
             page.evaluate(
                 """(idx) => {
@@ -230,11 +239,14 @@ def download_fams_report():
                 }""",
                 idx,
             )
-            # Small real delay every few clicks so we don't fire a burst of
-            # near-simultaneous background requests, without making 206
-            # individual waits prohibitively slow.
-            if i % 5 == 4:
-                page.wait_for_timeout(150)
+            try:
+                page.wait_for_selector(LOADING_SELECTOR, state="hidden", timeout=8000)
+            except Exception:
+                # Didn't clear in time - log once in a while and keep going
+                # rather than aborting the whole selection over one slow item.
+                pass
+            if (i + 1) % 25 == 0 or (i + 1) == total_to_select:
+                print(f"   -> Selected {i + 1}/{total_to_select} branches so far...")
 
         selected_count = page.evaluate("""() => {
             const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
