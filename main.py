@@ -183,7 +183,7 @@ def download_fams_report():
             # Confirms the Excel-mode UI (Search button etc.) actually rendered
             page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=30000)
 
-            # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
+            # Step 3: Check every branch numbered >= 700 in the Branches multi-select.
             #
             # IMPORTANT on HOW we select: inspecting the page HTML revealed the
             # checkbox UI is just a visual layer over a real, hidden backing
@@ -193,7 +193,7 @@ def download_fams_report():
             # checkboxes. Checkbox-based approaches were tried and all failed
             # for different reasons (see project history); the fix that works
             # is to skip the checkbox UI entirely and update the real <select>.
-            print("3. Selecting Branches >= 664...")
+            print("3. Selecting Branches >= 700...")
             debug_capture(page, f"before_branches_select_a{attempt_num}")
 
             selected_count = page.evaluate("""() => {
@@ -204,7 +204,7 @@ def download_fams_report():
                 Array.from(select.options).forEach(opt => {
                     const txt = opt.text || '';
                     const match = txt.match(/#?(\\d+)/);
-                    if (match && parseInt(match[1], 10) >= 664) {
+                    if (match && parseInt(match[1], 10) >= 700) {
                         opt.selected = true;
                         count++;
                     }
@@ -227,12 +227,12 @@ def download_fams_report():
             except Exception as e:
                 print(f"   -> Loading overlay did not clear within 30s ({e}); continuing anyway.")
 
-            print(f"   -> Branches matched and checked (>= 664): {selected_count}")
+            print(f"   -> Branches matched and checked (>= 700): {selected_count}")
             debug_capture(page, f"after_branches_select_a{attempt_num}")
 
             if selected_count == 0:
                 debug_capture(page, f"no_branches_matched_a{attempt_num}")
-                raise RuntimeError("No branches numbered >= 664 were found/checked.")
+                raise RuntimeError("No branches numbered >= 700 were found/checked.")
 
             # Close the dropdown so it doesn't overlap the Search/Export buttons
             page.keyboard.press("Escape")
@@ -398,7 +398,7 @@ def update_google_sheet(file_path):
             raise ValueError("No table found in exported data.")
         df = max(tables, key=lambda t: t.shape[0] * t.shape[1])
 
-    # Filter Store >= 664
+    # Filter Store >= 700
     store_col = [col for col in df.columns if 'store' in str(col).lower() or 'site' in str(col).lower() or 'branch' in str(col).lower() or 'location' in str(col).lower()]
     if store_col:
         col_name = store_col[0]
@@ -407,12 +407,12 @@ def update_google_sheet(file_path):
             str_val = str(val)
             nums = [int(s) for s in str_val.replace('-', ' ').split() if s.isdigit()]
             if nums:
-                return nums[0] >= 664
+                return nums[0] >= 700
             return True
 
         initial_rows = len(df)
         df = df[df[col_name].apply(filter_store)]
-        print(f"Filtered rows (Store >= 664): {initial_rows} -> {len(df)} rows.")
+        print(f"Filtered rows (Store >= 700): {initial_rows} -> {len(df)} rows.")
 
     df = df.fillna("")
 
