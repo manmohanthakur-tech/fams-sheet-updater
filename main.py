@@ -164,223 +164,213 @@ def download_fams_report():
         if "notfound" in page.url.lower() or "/error" in page.url.lower():
             raise RuntimeError(f"Navigation to Asset Enquiry ended up on an error page: {page.url}")
 
-        # Step 2: Switch to "Export Excel" mode. This is a radio button, and
-        # clicking it is what REVEALS the Branches-driven Search button, the
-        # live data table, and the Export button - none of those exist while
-        # "Export CSV" (the default) is selected. We already confirmed
-        # "Export CSV" is visible above, so "Export Excel" (right next to it)
-        # should be too - this is just a normal wait, not a recovery path.
-        print("2. Selecting 'Export Excel' option...")
-        debug_capture(page, "before_export_excel_wait")
+        def attempt_export_flow(attempt_num):
+            # Step 2: Switch to "Export Excel" mode. This is a radio button, and
+            # clicking it is what REVEALS the Branches-driven Search button, the
+            # live data table, and the Export button - none of those exist while
+            # "Export CSV" (the default) is selected. We already confirmed
+            # "Export CSV" is visible above, so "Export Excel" (right next to it)
+            # should be too - this is just a normal wait, not a recovery path.
+            print("2. Selecting 'Export Excel' option...")
+            debug_capture(page, f"before_export_excel_wait_a{attempt_num}")
 
-        export_excel_option = page.get_by_text("Export Excel", exact=True).first
-        export_excel_option.wait_for(state="visible", timeout=15000)
-        export_excel_option.click()
-        page.wait_for_timeout(2000)
-        debug_capture(page, "after_select_export_excel_mode")
+            export_excel_option = page.get_by_text("Export Excel", exact=True).first
+            export_excel_option.wait_for(state="visible", timeout=15000)
+            export_excel_option.click()
+            page.wait_for_timeout(2000)
+            debug_capture(page, f"after_select_export_excel_mode_a{attempt_num}")
 
-        # Confirms the Excel-mode UI (Search button etc.) actually rendered
-        page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=30000)
+            # Confirms the Excel-mode UI (Search button etc.) actually rendered
+            page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=30000)
 
-        # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
-        #
-        # IMPORTANT on HOW we select: inspecting the page HTML revealed the
-        # checkbox UI is just a visual layer over a real, hidden backing
-        # element: <select id="_ddlbranch" multiple onchange=
-        # "BranchListSelectedIndexChanged1(this,value)">. This is what the
-        # site's application code actually listens to - NOT the individual
-        # checkboxes. Three checkbox-based approaches were tried and all
-        # failed for different reasons:
-        #   1) .click() on all ~200 checkboxes in one synchronous burst ->
-        #      loading overlay permanently stuck (never cleared, even after
-        #      150s).
-        #   2) Setting .checked directly + one synthetic 'change' event on a
-        #      checkbox -> overlay cleared fine, but selection never
-        #      actually registered (Search returned ~11 leftover rows).
-        #   3) .click() on every checkbox, fully sequential with an explicit
-        #      wait between each -> selection registered correctly, but the
-        #      overlay STILL never cleared even once across 206 individual
-        #      waits (24+ minutes total) - proving this isn't a
-        #      timing/overlap problem, clicking checkboxes directly is just
-        #      not the right interaction at all for this widget.
-        #
-        # Fix: skip the checkbox UI entirely. Set .selected = true directly
-        # on the matching <option> elements inside the real backing <select>,
-        # then dispatch exactly ONE native 'change' event on that <select> -
-        # this is exactly what the site's own handler expects (the same
-        # event it would see from a real multi-select interaction), fired
-        # once, not 206 times.
-        print("3. Selecting Branches >= 664...")
-        debug_capture(page, "before_branches_select")
+            # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
+            #
+            # IMPORTANT on HOW we select: inspecting the page HTML revealed the
+            # checkbox UI is just a visual layer over a real, hidden backing
+            # element: <select id="_ddlbranch" multiple onchange=
+            # "BranchListSelectedIndexChanged1(this,value)">. This is what the
+            # site's application code actually listens to - NOT the individual
+            # checkboxes. Checkbox-based approaches were tried and all failed
+            # for different reasons (see project history); the fix that works
+            # is to skip the checkbox UI entirely and update the real <select>.
+            print("3. Selecting Branches >= 664...")
+            debug_capture(page, f"before_branches_select_a{attempt_num}")
 
-        selected_count = page.evaluate("""() => {
-            const select = document.querySelector('#_ddlbranch')
-                || document.querySelector('select[name="ddlBranches"]');
-            if (!select) return -1;
-            let count = 0;
-            Array.from(select.options).forEach(opt => {
-                const txt = opt.text || '';
-                const match = txt.match(/#?(\\d+)/);
-                if (match && parseInt(match[1], 10) >= 664) {
-                    opt.selected = true;
-                    count++;
-                }
-            });
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-            return count;
-        }""")
-
-        if selected_count == -1:
-            debug_capture(page, "branches_select_not_found")
-            raise RuntimeError(
-                "Could not find the backing <select id='_ddlbranch'> element. "
-                "Open debug_branches_select_not_found.html to check the current markup."
-            )
-
-        # The site's onchange handler processes the bulk selection - give it
-        # a moment, but this is one request now, not 206, so it shouldn't
-        # need anywhere near as long as the old per-checkbox approach.
-        LOADING_SELECTOR = "#loading-block .loading-indicator, .loading-indicator"
-        print("   -> Waiting for the branch-selection request to finish...")
-        try:
-            page.wait_for_selector(LOADING_SELECTOR, state="hidden", timeout=30000)
-            print("   -> Loading overlay cleared.")
-        except Exception as e:
-            print(f"   -> Loading overlay did not clear within 30s ({e}); continuing anyway.")
-
-        print(f"   -> Branches matched and checked (>= 664): {selected_count}")
-        debug_capture(page, "after_branches_select")
-
-        if selected_count == 0:
-            debug_capture(page, "no_branches_matched")
-            raise RuntimeError(
-                "No branches numbered >= 664 were found/checked. "
-                "Open debug_after_branches_select.html from the artifacts to inspect the branch list markup."
-            )
-
-        # Close the dropdown so it doesn't overlap the Search/Export buttons
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
-        debug_capture(page, "before_search_click")
-
-        # Step 4: Click Search and wait for the table to actually populate
-        print("4. Clicking Search and waiting for table data...")
-        page.get_by_role("button", name="Search", exact=True).click(timeout=60000)
-        table_populated = False
-        try:
-            page.wait_for_function(
-                """() => {
-                    const table = document.querySelector('table');
-                    if (!table) return false;
-                    const bodyText = table.innerText || '';
-                    return !bodyText.includes('No data available in table')
-                        && table.querySelectorAll('tbody tr').length > 0;
-                }""",
-                timeout=60000,
-            )
-            table_populated = True
-            print("   -> Table populated with data.")
-        except Exception as e:
-            print(f"   -> Table did not appear to populate within 60s: {e}")
-        debug_capture(page, "after_search_table_loaded")
-
-        if not table_populated:
-            raise RuntimeError(
-                "Search ran but the results table never populated with real data. "
-                "Check debug_after_search_table_loaded.png / .html to see what's on screen - "
-                "likely the branch selection didn't actually register with the site's search query."
-            )
-
-        # Step 5: Click Export and capture the download
-        print("5. Clicking Export button...")
-        file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
-
-        # The Export click navigates the page to a URL that generates the
-        # file server-side (confirmed: last run's failure showed url=
-        # '.../AssetEnquiry/Export', title='Loading .../Export' - the click
-        # DID fire correctly). With 221 branches selected this is a large
-        # export (likely tens of thousands of rows across ~100 columns), so
-        # give the server plenty of time rather than assuming it's stuck.
-        DOWNLOAD_TIMEOUT_MS = 8 * 60 * 1000  # 8 minutes
-        downloaded = False
-        try:
-            with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
-                # A stray "loading-indicator" element intercepts pointer
-                # events at this point even though it's not actually
-                # blocking real functionality (confirmed: it's still
-                # visible in a screenshot taken well after the table
-                # finished loading, and never clears no matter how long we
-                # wait). Playwright's own .click() refuses to click through
-                # it. Bypass hit-testing entirely with a direct JS click,
-                # which fires the real handler regardless of what's
-                # visually overlapping it - same fix that worked for the
-                # branch <select> in step 3.
-                clicked = page.evaluate("""() => {
-                    const candidates = Array.from(
-                        document.querySelectorAll("button, input[type='button'], input[type='submit'], a")
-                    );
-                    const exportBtn = candidates.find(el => {
-                        const txt = (el.value || el.innerText || el.textContent || '').trim();
-                        return txt === 'Export';
-                    });
-                    if (exportBtn) {
-                        exportBtn.click();
-                        return true;
+            selected_count = page.evaluate("""() => {
+                const select = document.querySelector('#_ddlbranch')
+                    || document.querySelector('select[name="ddlBranches"]');
+                if (!select) return -1;
+                let count = 0;
+                Array.from(select.options).forEach(opt => {
+                    const txt = opt.text || '';
+                    const match = txt.match(/#?(\\d+)/);
+                    if (match && parseInt(match[1], 10) >= 664) {
+                        opt.selected = true;
+                        count++;
                     }
-                    return false;
-                }""")
-                if not clicked:
-                    raise RuntimeError("Export button not found in the DOM at click time.")
-            download = download_info.value
-            download.save_as(file_path)
-            downloaded = True
-            print("Successfully downloaded exported report file!")
-        except Exception as e:
-            print(f"Download trigger note: {e}")
-            debug_capture(page, "step5_download_failed")
+                });
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+                return count;
+            }""")
 
-        if not downloaded:
-            # IMPORTANT: do NOT silently fall back to scraping the on-screen
-            # HTML table. That fallback only ever captures whatever small
-            # preview/leftover table happens to be visible (confirmed twice:
-            # it produced ~11 rows with a different, wrong column set,
-            # while still reporting "success" and overwriting the Google
-            # Sheet with bad data). A failed real download means something
-            # is genuinely wrong upstream - better to fail the run loudly
-            # than silently corrupt the sheet with incomplete data.
-            debug_capture(page, "download_failed_fatal")
-            raise RuntimeError(
-                "Real file download never triggered/completed. Refusing to fall back to "
-                "scraping the on-screen HTML table, since that has previously produced "
-                "incomplete/wrong data while still 'succeeding'. Check debug_download_failed_fatal.png "
-                "and debug_after_search_table_loaded.png to see what was on screen."
-            )
+            if selected_count == -1:
+                debug_capture(page, f"branches_select_not_found_a{attempt_num}")
+                raise RuntimeError(
+                    "Could not find the backing <select id='_ddlbranch'> element."
+                )
 
-        # The site wraps large exports in a ZIP archive rather than sending
-        # the .xlsx directly (confirmed: the downloaded file's real content
-        # is a zip containing a single "Asset-Enquiry.xlsx" inside - despite
-        # us naming the download "asset_report.xlsx", pandas correctly
-        # detected the actual bytes as a zip and had no reader for it).
-        # Detect this and extract the real spreadsheet before returning.
-        if zipfile.is_zipfile(file_path):
-            print("   -> Downloaded file is a ZIP archive; extracting the real spreadsheet...")
-            with zipfile.ZipFile(file_path) as zf:
-                inner_names = [
-                    n for n in zf.namelist()
-                    if n.lower().endswith((".xlsx", ".xls", ".csv")) and not n.endswith("/")
-                ]
-                if not inner_names:
-                    raise RuntimeError(
-                        f"Downloaded ZIP contained no .xlsx/.xls/.csv file. Contents: {zf.namelist()}"
-                    )
-                inner_name = inner_names[0]
-                extracted_path = os.path.join(DOWNLOAD_DIR, os.path.basename(inner_name))
-                with zf.open(inner_name) as src, open(extracted_path, "wb") as dst:
-                    dst.write(src.read())
-                print(f"   -> Extracted '{inner_name}' from ZIP -> {extracted_path}")
-                file_path = extracted_path
+            LOADING_SELECTOR = "#loading-block .loading-indicator, .loading-indicator"
+            print("   -> Waiting for the branch-selection request to finish...")
+            try:
+                page.wait_for_selector(LOADING_SELECTOR, state="hidden", timeout=30000)
+                print("   -> Loading overlay cleared.")
+            except Exception as e:
+                print(f"   -> Loading overlay did not clear within 30s ({e}); continuing anyway.")
 
-        return file_path
+            print(f"   -> Branches matched and checked (>= 664): {selected_count}")
+            debug_capture(page, f"after_branches_select_a{attempt_num}")
+
+            if selected_count == 0:
+                debug_capture(page, f"no_branches_matched_a{attempt_num}")
+                raise RuntimeError("No branches numbered >= 664 were found/checked.")
+
+            # Close the dropdown so it doesn't overlap the Search/Export buttons
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+            debug_capture(page, f"before_search_click_a{attempt_num}")
+
+            # Step 4: Click Search and wait for the table to actually populate
+            print("4. Clicking Search and waiting for table data...")
+            page.get_by_role("button", name="Search", exact=True).click(timeout=60000)
+            table_populated = False
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const table = document.querySelector('table');
+                        if (!table) return false;
+                        const bodyText = table.innerText || '';
+                        return !bodyText.includes('No data available in table')
+                            && table.querySelectorAll('tbody tr').length > 0;
+                    }""",
+                    timeout=60000,
+                )
+                table_populated = True
+                print("   -> Table populated with data.")
+            except Exception as e:
+                print(f"   -> Table did not appear to populate within 60s: {e}")
+            debug_capture(page, f"after_search_table_loaded_a{attempt_num}")
+
+            if not table_populated:
+                raise RuntimeError(
+                    "Search ran but the results table never populated with real data."
+                )
+
+            # Step 5: Click Export and capture the download
+            print("5. Clicking Export button...")
+            file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
+
+            # The Export click navigates the page to a URL that generates the
+            # file server-side. This can occasionally hang indefinitely on
+            # the server's end for a large export (confirmed: one run never
+            # completed even after waiting a full 8 minutes, while another
+            # otherwise-identical run finished in under 2 - genuine
+            # server-side flakiness, not something a longer timeout fixes).
+            # We use a moderate timeout here and let the OUTER retry loop
+            # handle a full fresh retry if this particular attempt hangs,
+            # rather than waiting arbitrarily long on one possibly-stuck
+            # request.
+            DOWNLOAD_TIMEOUT_MS = 4 * 60 * 1000  # 4 minutes per attempt
+            downloaded = False
+            try:
+                with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
+                    # A stray "loading-indicator" element intercepts pointer
+                    # events at this point even though it's not actually
+                    # blocking real functionality. Bypass hit-testing
+                    # entirely with a direct JS click, which fires the real
+                    # handler regardless of what's visually overlapping it -
+                    # same fix that worked for the branch <select>.
+                    clicked = page.evaluate("""() => {
+                        const candidates = Array.from(
+                            document.querySelectorAll("button, input[type='button'], input[type='submit'], a")
+                        );
+                        const exportBtn = candidates.find(el => {
+                            const txt = (el.value || el.innerText || el.textContent || '').trim();
+                            return txt === 'Export';
+                        });
+                        if (exportBtn) {
+                            exportBtn.click();
+                            return true;
+                        }
+                        return false;
+                    }""")
+                    if not clicked:
+                        raise RuntimeError("Export button not found in the DOM at click time.")
+                download = download_info.value
+                download.save_as(file_path)
+                downloaded = True
+                print("Successfully downloaded exported report file!")
+            except Exception as e:
+                print(f"Download trigger note: {e}")
+                debug_capture(page, f"step5_download_failed_a{attempt_num}")
+
+            if not downloaded:
+                # IMPORTANT: do NOT silently fall back to scraping the on-screen
+                # HTML table. That fallback only ever captures whatever small
+                # preview/leftover table happens to be visible (confirmed
+                # twice: it produced ~11 rows with a wrong column set, while
+                # still reporting "success" and overwriting the Google Sheet
+                # with bad data). Raise here so the outer loop can retry with
+                # a fresh page instead.
+                raise RuntimeError("Real file download never triggered/completed on this attempt.")
+
+            # The site wraps large exports in a ZIP archive rather than sending
+            # the .xlsx directly. Detect this and extract the real spreadsheet.
+            if zipfile.is_zipfile(file_path):
+                print("   -> Downloaded file is a ZIP archive; extracting the real spreadsheet...")
+                with zipfile.ZipFile(file_path) as zf:
+                    inner_names = [
+                        n for n in zf.namelist()
+                        if n.lower().endswith((".xlsx", ".xls", ".csv")) and not n.endswith("/")
+                    ]
+                    if not inner_names:
+                        raise RuntimeError(
+                            f"Downloaded ZIP contained no .xlsx/.xls/.csv file. Contents: {zf.namelist()}"
+                        )
+                    inner_name = inner_names[0]
+                    extracted_path = os.path.join(DOWNLOAD_DIR, os.path.basename(inner_name))
+                    with zf.open(inner_name) as src, open(extracted_path, "wb") as dst:
+                        dst.write(src.read())
+                    print(f"   -> Extracted '{inner_name}' from ZIP -> {extracted_path}")
+                    file_path = extracted_path
+
+            return file_path
+
+        MAX_EXPORT_ATTEMPTS = 2
+        last_error = None
+        for attempt_num in (1, 2)[:MAX_EXPORT_ATTEMPTS]:
+            try:
+                if attempt_num > 1:
+                    print(f"Retrying full Search->Export flow (attempt {attempt_num}/{MAX_EXPORT_ATTEMPTS})...")
+                    print("   -> Reloading Asset Enquiry page fresh before retrying...")
+                    page.goto("https://fams.vmart.co.in/WebfamsLive/AssetEnquiry", wait_until="networkidle")
+                    page.wait_for_timeout(2000)
+                    page.get_by_text("Export CSV", exact=True).first.wait_for(state="visible", timeout=20000)
+                    debug_capture(page, f"reloaded_before_attempt{attempt_num}")
+
+                result_path = attempt_export_flow(attempt_num)
+                return result_path
+            except Exception as e:
+                last_error = e
+                print(f"Attempt {attempt_num}/{MAX_EXPORT_ATTEMPTS} failed: {e}")
+                debug_capture(page, f"attempt{attempt_num}_failed")
+
+        debug_capture(page, "download_failed_fatal")
+        raise RuntimeError(
+            f"Export failed after {MAX_EXPORT_ATTEMPTS} attempts. Last error: {last_error}. "
+            "Check debug_download_failed_fatal.png and debug_attempt*_failed.png to see what was on screen. "
+            "This may be transient server-side slowness/hanging on the FAMS site rather than a script bug - "
+            "consider re-running the workflow manually."
+        )
 
     except Exception:
         # Always leave evidence behind before re-raising
