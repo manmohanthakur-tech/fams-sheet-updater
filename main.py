@@ -182,85 +182,71 @@ def download_fams_report():
         page.get_by_role("button", name="Search", exact=True).wait_for(state="visible", timeout=30000)
 
         # Step 3: Check every branch numbered >= 664 in the Branches multi-select.
-        # NOTE: we deliberately do NOT click a toggle to "open" the dropdown
-        # first - the checkboxes already exist in the DOM (just visually
-        # collapsed), and clicking works regardless of the panel's visibility.
         #
-        # IMPORTANT on HOW we click: three approaches were tried:
-        #   1) Firing .click() on all ~200 matching checkboxes in one
-        #      synchronous JS burst overwhelmed the page and left its
-        #      loading overlay permanently stuck (confirmed: never cleared
-        #      even after 150s).
-        #   2) Setting .checked directly + firing one synthetic 'change'
-        #      event avoided the hang, but the widget tracks selection in
-        #      its own internal JS state (not by reading checkbox.checked
-        #      from the DOM) - nothing was actually registered as selected,
-        #      and Search returned near-empty results (confirmed: only 11
-        #      leftover rows).
-        #   3) Real .click() events with light spacing (pause every 5
-        #      clicks) correctly registered the selection (203/206
-        #      confirmed checked), but STILL left the overlay permanently
-        #      stuck - light spacing wasn't enough to prevent overlapping
-        #      in-flight requests.
+        # IMPORTANT on HOW we select: inspecting the page HTML revealed the
+        # checkbox UI is just a visual layer over a real, hidden backing
+        # element: <select id="_ddlbranch" multiple onchange=
+        # "BranchListSelectedIndexChanged1(this,value)">. This is what the
+        # site's application code actually listens to - NOT the individual
+        # checkboxes. Three checkbox-based approaches were tried and all
+        # failed for different reasons:
+        #   1) .click() on all ~200 checkboxes in one synchronous burst ->
+        #      loading overlay permanently stuck (never cleared, even after
+        #      150s).
+        #   2) Setting .checked directly + one synthetic 'change' event on a
+        #      checkbox -> overlay cleared fine, but selection never
+        #      actually registered (Search returned ~11 leftover rows).
+        #   3) .click() on every checkbox, fully sequential with an explicit
+        #      wait between each -> selection registered correctly, but the
+        #      overlay STILL never cleared even once across 206 individual
+        #      waits (24+ minutes total) - proving this isn't a
+        #      timing/overlap problem, clicking checkboxes directly is just
+        #      not the right interaction at all for this widget.
         #
-        # Fix: fully SEQUENTIAL clicking - click one checkbox, then
-        # explicitly wait for the loading overlay to clear before clicking
-        # the next one. This guarantees at most one request in flight at a
-        # time. Slower (~200 round trips, each waiting on the page), but
-        # this is the only approach that avoids both failure modes: real
-        # clicks (so selection actually registers) with no overlap
-        # (so the overlay never gets stuck).
+        # Fix: skip the checkbox UI entirely. Set .selected = true directly
+        # on the matching <option> elements inside the real backing <select>,
+        # then dispatch exactly ONE native 'change' event on that <select> -
+        # this is exactly what the site's own handler expects (the same
+        # event it would see from a real multi-select interaction), fired
+        # once, not 206 times.
         print("3. Selecting Branches >= 664...")
         debug_capture(page, "before_branches_select")
 
-        matching_indices = page.evaluate("""() => {
-            const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
-            const indices = [];
-            checkboxes.forEach((cb, idx) => {
-                const label = cb.closest('label') || cb.parentElement;
-                const txt = (label ? label.innerText : cb.value) || '';
-                const match = txt.match(/#?(\\d+)/);
-                if (match && parseInt(match[1], 10) >= 664 && !cb.checked) {
-                    indices.push(idx);
-                }
-            });
-            return indices;
-        }""")
-        total_to_select = len(matching_indices)
-        print(f"   -> Branches to select (>= 664): {total_to_select}")
-
-        LOADING_SELECTOR = "#loading-block .loading-indicator, .loading-indicator"
-        for i, idx in enumerate(matching_indices):
-            page.evaluate(
-                """(idx) => {
-                    const checkboxes = document.querySelectorAll("input[type='checkbox']");
-                    const cb = checkboxes[idx];
-                    if (cb && !cb.checked) cb.click();
-                }""",
-                idx,
-            )
-            try:
-                page.wait_for_selector(LOADING_SELECTOR, state="hidden", timeout=8000)
-            except Exception:
-                # Didn't clear in time - log once in a while and keep going
-                # rather than aborting the whole selection over one slow item.
-                pass
-            if (i + 1) % 25 == 0 or (i + 1) == total_to_select:
-                print(f"   -> Selected {i + 1}/{total_to_select} branches so far...")
-
         selected_count = page.evaluate("""() => {
-            const checkboxes = Array.from(document.querySelectorAll("input[type='checkbox']"));
+            const select = document.querySelector('#_ddlbranch')
+                || document.querySelector('select[name="ddlBranches"]');
+            if (!select) return -1;
             let count = 0;
-            checkboxes.forEach(cb => {
-                const label = cb.closest('label') || cb.parentElement;
-                const txt = (label ? label.innerText : cb.value) || '';
+            Array.from(select.options).forEach(opt => {
+                const txt = opt.text || '';
                 const match = txt.match(/#?(\\d+)/);
-                if (match && parseInt(match[1], 10) >= 664 && cb.checked) {
+                if (match && parseInt(match[1], 10) >= 664) {
+                    opt.selected = true;
                     count++;
                 }
             });
+            select.dispatchEvent(new Event('change', { bubbles: true }));
             return count;
         }""")
+
+        if selected_count == -1:
+            debug_capture(page, "branches_select_not_found")
+            raise RuntimeError(
+                "Could not find the backing <select id='_ddlbranch'> element. "
+                "Open debug_branches_select_not_found.html to check the current markup."
+            )
+
+        # The site's onchange handler processes the bulk selection - give it
+        # a moment, but this is one request now, not 206, so it shouldn't
+        # need anywhere near as long as the old per-checkbox approach.
+        LOADING_SELECTOR = "#loading-block .loading-indicator, .loading-indicator"
+        print("   -> Waiting for the branch-selection request to finish...")
+        try:
+            page.wait_for_selector(LOADING_SELECTOR, state="hidden", timeout=30000)
+            print("   -> Loading overlay cleared.")
+        except Exception as e:
+            print(f"   -> Loading overlay did not clear within 30s ({e}); continuing anyway.")
+
         print(f"   -> Branches matched and checked (>= 664): {selected_count}")
         debug_capture(page, "after_branches_select")
 
@@ -274,23 +260,6 @@ def download_fams_report():
         # Close the dropdown so it doesn't overlap the Search/Export buttons
         page.keyboard.press("Escape")
         page.wait_for_timeout(500)
-        debug_capture(page, "after_branch_selection")
-
-        # Checking 206 branch checkboxes fires that many change-triggered
-        # background calls, which can leave a loading overlay up for a while.
-        # Wait for it to clear before trying to interact with Search -
-        # otherwise the click just gets blocked ("subtree intercepts pointer
-        # events") and retries until Playwright's default timeout runs out.
-        print("   -> Waiting for any loading overlay to clear before Search...")
-        try:
-            page.wait_for_selector(
-                "#loading-block .loading-indicator, .loading-indicator",
-                state="hidden",
-                timeout=30000,
-            )
-            print("   -> Loading overlay cleared.")
-        except Exception as e:
-            print(f"   -> Loading overlay did not clear within 30s ({e}); attempting Search click anyway.")
         debug_capture(page, "before_search_click")
 
         # Step 4: Click Search and wait for the table to actually populate
