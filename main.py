@@ -297,7 +297,32 @@ def download_fams_report():
         downloaded = False
         try:
             with page.expect_download(timeout=90000) as download_info:
-                page.get_by_role("button", name="Export", exact=True).click(timeout=30000)
+                # A stray "loading-indicator" element intercepts pointer
+                # events at this point even though it's not actually
+                # blocking real functionality (confirmed: it's still
+                # visible in a screenshot taken well after the table
+                # finished loading, and never clears no matter how long we
+                # wait). Playwright's own .click() refuses to click through
+                # it. Bypass hit-testing entirely with a direct JS click,
+                # which fires the real handler regardless of what's
+                # visually overlapping it - same fix that worked for the
+                # branch <select> in step 3.
+                clicked = page.evaluate("""() => {
+                    const candidates = Array.from(
+                        document.querySelectorAll("button, input[type='button'], input[type='submit'], a")
+                    );
+                    const exportBtn = candidates.find(el => {
+                        const txt = (el.value || el.innerText || el.textContent || '').trim();
+                        return txt === 'Export';
+                    });
+                    if (exportBtn) {
+                        exportBtn.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+                if not clicked:
+                    raise RuntimeError("Export button not found in the DOM at click time.")
             download = download_info.value
             download.save_as(file_path)
             downloaded = True
