@@ -1,5 +1,6 @@
 import json
 import os
+import zipfile
 import gspread
 import pandas as pd
 from playwright.sync_api import sync_playwright
@@ -354,6 +355,30 @@ def download_fams_report():
                 "incomplete/wrong data while still 'succeeding'. Check debug_download_failed_fatal.png "
                 "and debug_after_search_table_loaded.png to see what was on screen."
             )
+
+        # The site wraps large exports in a ZIP archive rather than sending
+        # the .xlsx directly (confirmed: the downloaded file's real content
+        # is a zip containing a single "Asset-Enquiry.xlsx" inside - despite
+        # us naming the download "asset_report.xlsx", pandas correctly
+        # detected the actual bytes as a zip and had no reader for it).
+        # Detect this and extract the real spreadsheet before returning.
+        if zipfile.is_zipfile(file_path):
+            print("   -> Downloaded file is a ZIP archive; extracting the real spreadsheet...")
+            with zipfile.ZipFile(file_path) as zf:
+                inner_names = [
+                    n for n in zf.namelist()
+                    if n.lower().endswith((".xlsx", ".xls", ".csv")) and not n.endswith("/")
+                ]
+                if not inner_names:
+                    raise RuntimeError(
+                        f"Downloaded ZIP contained no .xlsx/.xls/.csv file. Contents: {zf.namelist()}"
+                    )
+                inner_name = inner_names[0]
+                extracted_path = os.path.join(DOWNLOAD_DIR, os.path.basename(inner_name))
+                with zf.open(inner_name) as src, open(extracted_path, "wb") as dst:
+                    dst.write(src.read())
+                print(f"   -> Extracted '{inner_name}' from ZIP -> {extracted_path}")
+                file_path = extracted_path
 
         return file_path
 
