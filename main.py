@@ -294,9 +294,16 @@ def download_fams_report():
         print("5. Clicking Export button...")
         file_path = os.path.join(DOWNLOAD_DIR, "asset_report.xlsx")
 
+        # The Export click navigates the page to a URL that generates the
+        # file server-side (confirmed: last run's failure showed url=
+        # '.../AssetEnquiry/Export', title='Loading .../Export' - the click
+        # DID fire correctly). With 221 branches selected this is a large
+        # export (likely tens of thousands of rows across ~100 columns), so
+        # give the server plenty of time rather than assuming it's stuck.
+        DOWNLOAD_TIMEOUT_MS = 8 * 60 * 1000  # 8 minutes
         downloaded = False
         try:
-            with page.expect_download(timeout=90000) as download_info:
+            with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
                 # A stray "loading-indicator" element intercepts pointer
                 # events at this point even though it's not actually
                 # blocking real functionality (confirmed: it's still
